@@ -1,0 +1,11 @@
+{
+    "max_epoch": 20,
+    "epoch": -1,
+    "depth": 8,
+    "K": 1,
+    "lr": 0.001,
+    "sim_name": "rosenbrock",
+    "lr_step": 5,
+    "batchsize": 256,
+    "n_hidden": 64
+}

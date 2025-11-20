@@ -1,0 +1,11 @@
+{
+    "max_epoch": 50,
+    "depth": 8,
+    "K": 4,
+    "lr": 0.001,
+    "sim_name": "rosenbrock-amortized",
+    "lr_step": 5,
+    "sigma": 0.4,
+    "batchsize": 256,
+    "n_hidden": 64
+}
