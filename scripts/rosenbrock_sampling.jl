@@ -105,17 +105,14 @@ ax.set_title("Predicted samples")
 wsave(joinpath(save_path, "nf-samples.png"), fig)
 close(fig)
 
-# ============================================================
-# NEW: Likelihood comparison plot
-# ============================================================
+# Likelihood comparison plot
 
 # Compute log-likelihood using the network (exact_likelihood function)
 loglike_G = exact_likelihood(G, X_test)
 
 # Compute true log-likelihood using Rosenbrock distribution
 # Reshape X_test from 1×1×2×test_size to 2×test_size for Rosenbrock
-X_test_2d_for_logpdf = reshape(X_test, 2, test_size)
-loglike_true = Rosenbrock.logpdf(RB_dist, X_test_2d_for_logpdf)
+loglike_true = Rosenbrock.logpdf(RB_dist, X_test_2d)
 
 # Compute KL divergence + constant
 kl_divergence = mean(loglike_true - loglike_G)
