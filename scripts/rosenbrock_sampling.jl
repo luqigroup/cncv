@@ -105,4 +105,48 @@ ax.set_title("Predicted samples")
 wsave(joinpath(save_path, "nf-samples.png"), fig)
 close(fig)
 
+# ============================================================
+# NEW: Likelihood comparison plot
+# ============================================================
+
+# Compute log-likelihood using the network (exact_likelihood function)
+loglike_G = exact_likelihood(G, X_test)
+
+# Compute true log-likelihood using Rosenbrock distribution
+# Reshape X_test from 1×1×2×test_size to 2×test_size for Rosenbrock
+X_test_2d_for_logpdf = reshape(X_test, 2, test_size)
+loglike_true = Rosenbrock.logpdf(RB_dist, X_test_2d_for_logpdf)
+
+# Compute KL divergence + constant
+kl_divergence = mean(loglike_true - loglike_G)
+println("KL divergence + const.: ", kl_divergence)
+
+# Create histogram comparison plot
+fig = figure("histogram", figsize=(7, 2.5))
+ax = histplot(
+    loglike_true,
+    kde=true,
+    bins=50,
+    label = "true log-likelihood",
+    alpha= 0.8,
+    color="#ff8800"
+)
+histplot(
+    loglike_G,
+    kde=true,
+    bins=50,
+    label = "predicted log-likelihood",
+    alpha= 0.8,
+    color="#00b4ba")
+for label in ax.get_xticklabels()
+    label.set_fontproperties(font_prop)
+end
+for label in ax.get_yticklabels()
+    label.set_fontproperties(font_prop)
+end
+ax.set_xlabel("Log-likelihood", fontproperties=font_prop)
+ax.legend(prop=font_prop)
+wsave(joinpath(save_path, "log-like-hist.png"), fig)
+close(fig)
+
 upload_to_dropbox(args["sim_name"])

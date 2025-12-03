@@ -45,5 +45,8 @@ include("./objectives/exact_likelihood.jl")
 include("./sampling/pSGLD.jl")
 include("./sampling/sample.jl")
 
+# Models
+# include("./models/control_variate.jl")
+
 end
 
