@@ -5,7 +5,7 @@ using DrWatson
 @quickactivate :CNCV
 
 using InvertibleNetworks
-using Rosenbrock
+using Distributions
 using Random
 using ProgressMeter
 using Flux
@@ -13,29 +13,36 @@ using Flux
 # Random seed
 Random.seed!(19)
 
-args = read_config("rosenbrock_training.json")
+args = read_config("gaussian_training.json")
 args = parse_input_args(args)
 
 device = cpu # InvertibleNetworks.CUDA.functional() ? gpu : cpu
+
+# Gaussian parameters
+mu = [-2.0f0, 0.0f0]
+sigma = [0.2f0, 0.1f0, 0.1f0, 4.0f0]
 
 # Define network.
 G = NetworkGlow(2, args["n_hidden"], args["depth"], args["K"], freeze_conv = false)
 G = G |> device
 
 # Training data number.
-ntrain = 2^14
+ntrain = 5120
 
 # Validation data number.
-nval = 2^10
+nval = 512
 
 p = Progress(Int(floor(ntrain / args["batchsize"])) * args["max_epoch"])
 
 # Generate training data: rand returns 2×ntrain, reshape to 1×1×2×ntrain
-RB_dist = RosenbrockDistribution(0.0f0, 5.0f-1)
-X_train_2d = rand(RB_dist, ntrain)  # 2×ntrain
+gaussian_dist = MultivariateNormal(
+    Vector{Float32}(mu),
+    reshape(Vector{Float32}(sigma), (2, 2))
+    )
+X_train_2d = rand(gaussian_dist, ntrain)  # 2×ntrain
 X_train = reshape(X_train_2d, 1, 1, 2, ntrain) |> device
 
-X_val_2d = rand(RB_dist, nval)  # 2×nval
+X_val_2d = rand(gaussian_dist, nval)  # 2×nval
 X_val = reshape(X_val_2d, 1, 1, 2, nval) |> device
 
 # Training Batch extractor.
@@ -93,6 +100,8 @@ for epoch = 1:args["max_epoch"]
                 "fval_eval" => fval_eval,
                 "opt" => opt,
                 "G" => G |> cpu,
+                "mu" => mu,
+                "sigma" => sigma,
             ),
         )
         @tagsave(

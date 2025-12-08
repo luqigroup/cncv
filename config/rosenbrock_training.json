@@ -6,5 +6,5 @@
     "sim_name": "rosenbrock",
     "lr_step": 5,
     "batchsize": 256,
-    "n_hidden": 64
+    "n_hidden": 128
 }
