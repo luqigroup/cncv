@@ -1246,8 +1246,8 @@ uuid = "f50d1b31-88e8-58de-be2c-1cc44531875f"
 version = "0.5.1+0"
 
 [[deps.Rosenbrock]]
-deps = ["DrWatson", "Pkg", "PyPlot", "Random", "Statistics"]
-git-tree-sha1 = "e827d38c857d8c118d517faa1d378e2041133c70"
+deps = ["Distributions", "DrWatson", "Pkg", "PyPlot", "Random", "Statistics"]
+git-tree-sha1 = "7557f5e097b4dca2dc0114fc04af39eb9b529061"
 repo-rev = "main"
 repo-url = "https://github.com/luqigroup/Rosenbrock.jl"
 uuid = "c23fb45c-8f64-40e4-b594-aa994fe44f9b"
