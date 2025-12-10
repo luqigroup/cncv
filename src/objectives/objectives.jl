@@ -4,7 +4,7 @@
 export negative_log_likelihood
 
 
-function negative_log_likelihood(Net::NetworkGlow, X::AbstractArray{Float32,4}; grad::Bool = true)
+function negative_log_likelihood(Net::Union{NetworkGlow, NetworkGlowCV}, X::AbstractArray{Float32,4}; grad::Bool = true)
 
     Zx, logdet = Net.forward(X)
     z_size = size(Zx)
@@ -24,7 +24,7 @@ end
 
 
 function negative_log_likelihood(
-    Net::NetworkConditionalGlow,
+    Net::Union{NetworkConditionalGlow, NetworkConditionalGlowCV},
     X::AbstractArray{Float32,4},
     Y::AbstractArray{Float32,4};
     grad::Bool = true,
