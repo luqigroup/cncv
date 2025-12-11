@@ -1,4 +1,4 @@
-# Conditional coupling layer based on GLOW and cIIN - CV version (no logdet)
+# Conditional coupling layer based on GLOW and cIIN - CV version (with jacobian trace)
 # Adapted for compressed sensing applications
 # Date: January 2022
 
@@ -43,9 +43,9 @@ or
 
  *Usage:*
 
- - Forward mode: `Y = CL.forward(X, C)`
+ - Forward mode: `Y, jac_trace = CL.forward(X, C)`
 
- - Inverse mode: `X = CL.inverse(Y, C)`
+ - Inverse mode: `X, jac_trace = CL.inverse(Y, C)`
 
  - Backward mode: `ΔX, X, ΔC = CL.backward(ΔY, Y, C)`
 
@@ -88,10 +88,14 @@ end
 
 ConditionalLayerGlowCV3D(args...;kw...) = ConditionalLayerGlowCV(args...; kw..., ndims=3)
 
+## Jacobian trace computation
+# For conditional glow coupling layer: jac_trace = sum(Sm)
+conditional_glow_jac_trace_forward(S) = dropdims(sum(S; dims=tuple(1:ndims(S)-1...)); dims=tuple(1:ndims(S)-1...))
+
 # Forward pass: Input X, Output Y
 function forward(X::AbstractArray{T, N}, C::AbstractArray{T, N}, L::ConditionalLayerGlowCV) where {T,N}
 
-    X_ = L.C.forward(X)
+    X_, jac_trace_conv = L.C.forward(X)
     X1, X2 = tensor_split(X_)
 
     Y2 = copy(X2)
@@ -106,7 +110,11 @@ function forward(X::AbstractArray{T, N}, C::AbstractArray{T, N}, L::ConditionalL
 
     Y = tensor_cat(Y1, Y2)
 
-    return Y
+    # Compute total jacobian trace (conv1x1 + coupling)
+    jac_trace_coupling = conditional_glow_jac_trace_forward(Sm)
+    jac_trace_batch = jac_trace_conv .+ jac_trace_coupling
+
+    return Y, jac_trace_batch
 end
 
 # Inverse pass: Input Y, Output X
@@ -123,16 +131,20 @@ function inverse(Y::AbstractArray{T, N}, C::AbstractArray{T, N}, L::ConditionalL
     X1 = (Y1 - Tm) ./ (Sm .+ eps(T)) # add epsilon to avoid division by 0
 
     X_ = tensor_cat(X1, X2)
-    X = L.C.inverse(X_)
+    X, jac_trace_conv = L.C.inverse(X_)
 
-    save == true ? (return X, X1, X2, logS, Sm) : (return X)
+    # Compute total jacobian trace (conv1x1 + coupling)
+    jac_trace_coupling = conditional_glow_jac_trace_forward(Sm)
+    jac_trace_batch = jac_trace_conv .+ jac_trace_coupling
+
+    save == true ? (return X, jac_trace_batch, X1, X2, logS, Sm) : (return X, jac_trace_batch)
 end
 
 # Backward pass: Input (ΔY, Y), Output (ΔX, X)
 function backward(ΔY::AbstractArray{T, N}, Y::AbstractArray{T, N}, C::AbstractArray{T, N}, L::ConditionalLayerGlowCV) where {T,N}
 
     # Recompute forward state
-    X, X1, X2, logS, S = inverse(Y, C, L; save=true)
+    X, _, X1, X2, logS, S = inverse(Y, C, L; save=true)
 
     # Backpropagate residual
     ΔY1, ΔY2 = tensor_split(ΔY)
@@ -146,7 +158,7 @@ function backward(ΔY::AbstractArray{T, N}, Y::AbstractArray{T, N}, C::AbstractA
     ΔX2 += ΔY2
 
     # Backpropagate 1x1 conv
-    ΔX = L.C.inverse((tensor_cat(ΔX1, ΔX2), tensor_cat(X1, X2)))[1]
+    ΔX, _, _ = L.C.inverse((tensor_cat(ΔX1, ΔX2), tensor_cat(X1, X2)))
 
     return ΔX, X, ΔC
 end

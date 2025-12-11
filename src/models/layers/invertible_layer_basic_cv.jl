@@ -1,4 +1,4 @@
-# Affine coupling layer from Dinh et al. (2017) - CV version (no logdet)
+# Affine coupling layer from Dinh et al. (2017) - CV version (with jacobian trace)
 # Adapted for compressed sensing applications
 # Author: Philipp Witte, pwitte3@gatech.edu
 # Date: January 2020
@@ -42,9 +42,9 @@ or
 
  *Usage:*
 
- - Forward mode: `Y1, Y2 = CL.forward(X1, X2)`
+ - Forward mode: `Y1, Y2, jac_trace = CL.forward(X1, X2)`
 
- - Inverse mode: `X1, X2 = CL.inverse(Y1, Y2)`
+ - Inverse mode: `X1, X2, jac_trace = CL.inverse(Y1, Y2)`
 
  - Backward mode: `ΔX1, ΔX2, X1, X2 = CL.backward(ΔY1, ΔY2, Y1, Y2)`
 
@@ -83,6 +83,10 @@ end
 
 CouplingLayerBasicCV3D(args...;kw...) = CouplingLayerBasicCV(args...; kw..., ndims=3)
 
+## Jacobian trace computation
+# For coupling layer: jac_trace = sum(S)
+coupling_jac_trace_forward(S) = dropdims(sum(S; dims=tuple(1:ndims(S)-1...)); dims=tuple(1:ndims(S)-1...))
+
 # 2D/3D Forward pass: Input X, Output Y
 function forward(X1::AbstractArray{T, N}, X2::AbstractArray{T, N}, L::CouplingLayerBasicCV; save::Bool=false) where {T, N}
 
@@ -91,7 +95,10 @@ function forward(X1::AbstractArray{T, N}, X2::AbstractArray{T, N}, L::CouplingLa
     S = L.activation.forward(logS_T1)
     Y2 = S.*X2 + logS_T2
 
-    save ? (return X1, Y2, logS_T1, S) : (return X1, Y2)
+    # Compute jacobian trace per batch element
+    jac_trace_batch = coupling_jac_trace_forward(S)
+
+    save ? (return X1, Y2, jac_trace_batch, logS_T1, S) : (return X1, Y2, jac_trace_batch)
 end
 
 # 2D/3D Inverse pass: Input Y, Output X
@@ -102,14 +109,17 @@ function inverse(Y1::AbstractArray{T, N}, Y2::AbstractArray{T, N}, L::CouplingLa
     S = L.activation.forward(logS_T1)
     X2 = (Y2 - logS_T2) ./ (S .+ eps(T)) # add epsilon to avoid division by 0
 
-    save == true ? (return Y1, X2, logS_T1, S) : (return Y1, X2)
+    # Compute jacobian trace per batch element
+    jac_trace_batch = coupling_jac_trace_forward(S)
+
+    save == true ? (return Y1, X2, jac_trace_batch, logS_T1, S) : (return Y1, X2, jac_trace_batch)
 end
 
 # 2D/3D Backward pass: Input (ΔY, Y), Output (ΔX, X)
 function backward(ΔY1::AbstractArray{T, N}, ΔY2::AbstractArray{T, N}, Y1::AbstractArray{T, N}, Y2::AbstractArray{T, N}, L::CouplingLayerBasicCV; set_grad::Bool=true) where {T, N}
 
     # Recompute forward state
-    X1, X2, logS_T1, S = inverse(Y1, Y2, L; save=true)
+    X1, X2, _, logS_T1, S = inverse(Y1, Y2, L; save=true)
 
     # Backpropagate residual
     ΔT = copy(ΔY2)
@@ -134,7 +144,7 @@ end
 function backward_inv(ΔX1::AbstractArray{T, N}, ΔX2::AbstractArray{T, N}, X1::AbstractArray{T, N}, X2::AbstractArray{T, N}, L::CouplingLayerBasicCV; set_grad::Bool=true) where {T, N}
 
     # Recompute inverse state
-    Y1, Y2, logS_T1, S = forward(X1, X2, L; save=true)
+    Y1, Y2, _, logS_T1, S = forward(X1, X2, L; save=true)
 
     # Backpropagate residual
     ΔT = -ΔX2 ./ S

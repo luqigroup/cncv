@@ -1,4 +1,4 @@
-# Invertible network based on Glow (Kingma and Dhariwal, 2018) - CV version (no logdet)
+# Invertible network based on Glow (Kingma and Dhariwal, 2018) - CV version (with jacobian trace)
 # Includes 1x1 convolution and residual block
 # Adapted for compressed sensing applications
 # Author: Philipp Witte, pwitte3@gatech.edu
@@ -49,7 +49,7 @@ export NetworkConditionalGlowCV, NetworkConditionalGlowCV3D
 
  *Usage:*
 
- - Forward mode: `ZX, ZC = G.forward(X, C)`
+ - Forward mode: `ZX, ZC, jac_trace = G.forward(X, C)`
 
  - Backward mode: `ΔX, X, ΔC = G.backward(ΔZX, ZX, ZC)`
 
@@ -104,19 +104,24 @@ end
 
 NetworkConditionalGlowCV3D(args; kw...) = NetworkConditionalGlowCV(args...; kw..., ndims=3)
 
-# Forward pass
+# Forward pass and compute jacobian trace
 function forward(X::AbstractArray{T, N}, C::AbstractArray{T, N}, G::NetworkConditionalGlowCV) where {T, N}
     G.split_scales && (Z_save = array_of_array(X, G.L-1))
     orig_shape = size(X)
 
-    C = G.AN_C.forward(C)
+    C, jac_trace_c = G.AN_C.forward(C)
+
+    # Initialize jacobian trace accumulator
+    batchsize = size(X)[N]
+    jac_trace_total = copy(jac_trace_c)
 
     for i=1:G.L
         (G.split_scales) && (X = G.squeezer.forward(X))
         (G.split_scales) && (C = G.squeezer.forward(C))
         for j=1:G.K
-            X = G.AN[i, j].forward(X)
-            X = G.CL[i, j].forward(X, C)
+            X, jac_trace_an = G.AN[i, j].forward(X)
+            X, jac_trace_cl = G.CL[i, j].forward(X, C)
+            jac_trace_total .+= jac_trace_an .+ jac_trace_cl
         end
         if G.split_scales && i < G.L    # don't split after last iteration
             X, Z = tensor_split(X)
@@ -125,25 +130,32 @@ function forward(X::AbstractArray{T, N}, C::AbstractArray{T, N}, G::NetworkCondi
         end
     end
     G.split_scales && (X = reshape(cat_states(Z_save, X),orig_shape))
-    return X, C
+    return X, C, jac_trace_total
 end
 
 # Inverse pass
 function inverse(X::AbstractArray{T, N}, C::AbstractArray{T, N}, G::NetworkConditionalGlowCV) where {T, N}
     G.split_scales && ((Z_save, X) = split_states(X[:], G.Z_dims))
+
+    # Initialize jacobian trace accumulator
+    batchsize = size(X)[N]
+    jac_trace_total = zeros(T, batchsize)
+
     for i=G.L:-1:1
         if G.split_scales && i < G.L
             X = tensor_cat(X, Z_save[i])
         end
         for j=G.K:-1:1
-            X = G.CL[i, j].inverse(X, C)
-            X = G.AN[i, j].inverse(X)
+            X, jac_trace_cl = G.CL[i, j].inverse(X, C)
+            X, jac_trace_an = G.AN[i, j].inverse(X)
+            jac_trace_total .+= jac_trace_an .+ jac_trace_cl
         end
 
         (G.split_scales) && (X = G.squeezer.inverse(X))
         (G.split_scales) && (C = G.squeezer.inverse(C))
     end
-    return X
+
+    return X, jac_trace_total
 end
 
 # Backward pass and compute gradients

@@ -1,4 +1,4 @@
-# Invertible network based on Glow (Kingma and Dhariwal, 2018) - CV version (no logdet)
+# Invertible network based on Glow (Kingma and Dhariwal, 2018) - CV version (with jacobian trace)
 # Includes 1x1 convolution and residual block
 # Adapted for compressed sensing applications
 # Author: Philipp Witte, pwitte3@gatech.edu
@@ -47,7 +47,7 @@ export NetworkGlowCV, NetworkGlowCV3D
 
  *Usage:*
 
- - Forward mode: `Y = G.forward(X)`
+ - Forward mode: `Y, jac_trace = G.forward(X)`
 
  - Backward mode: `ΔX, X = G.backward(ΔY, Y)`
 
@@ -103,15 +103,20 @@ end
 
 NetworkGlowCV3D(args; kw...) = NetworkGlowCV(args...; kw..., ndims=3)
 
-# Forward pass
+# Forward pass and compute jacobian trace
 function forward(X::AbstractArray{T, N}, G::NetworkGlowCV) where {T, N}
     G.split_scales && (Z_save = array_of_array(X, max(G.L-1,1)))
+
+    # Initialize jacobian trace accumulator
+    batchsize = size(X)[N]
+    jac_trace_total = zeros(T, batchsize)
 
     for i=1:G.L
         (G.split_scales) && (X = G.squeezer.forward(X))
         for j=1:G.K
-            X = G.AN[i, j].forward(X)
-            X = G.CL[i, j].forward(X)
+            X, jac_trace_an = G.AN[i, j].forward(X)
+            X, jac_trace_cl = G.CL[i, j].forward(X)
+            jac_trace_total .+= jac_trace_an .+ jac_trace_cl
         end
         if G.split_scales && (i < G.L || i == 1)    # don't split after last iteration
             X, Z = tensor_split(X)
@@ -121,25 +126,31 @@ function forward(X::AbstractArray{T, N}, G::NetworkGlowCV) where {T, N}
     end
     G.split_scales && (X = cat_states(Z_save, X))
 
-    return X
+    return X, jac_trace_total
 end
 
 # Inverse pass
 function inverse(Z::AbstractArray{T, N}, G::NetworkGlowCV) where {T, N}
     X = Z
     G.split_scales && ((Z_save, X) = split_states(X, G.Z_dims;L_net=G.L))
+
+    # Initialize jacobian trace accumulator
+    batchsize = size(X)[N]
+    jac_trace_total = zeros(T, batchsize)
+
     for i=G.L:-1:1
         if G.split_scales && (i < G.L || G.L == 1)
             X = tensor_cat(X, Z_save[i])
         end
         for j=G.K:-1:1
-            X = G.CL[i, j].inverse(X)
-            X = G.AN[i, j].inverse(X)
+            X, jac_trace_cl = G.CL[i, j].inverse(X)
+            X, jac_trace_an = G.AN[i, j].inverse(X)
+            jac_trace_total .+= jac_trace_an .+ jac_trace_cl
         end
 
         (G.split_scales) && (X = G.squeezer.inverse(X))
     end
-    return X
+    return X, jac_trace_total
 end
 
 # Backward pass and compute gradients

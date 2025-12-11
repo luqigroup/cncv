@@ -1,4 +1,4 @@
-# Activation normalization layer (CV version - no logdet)
+# Activation normalization layer (CV version - with jacobian trace)
 # Adapted for compressed sensing applications
 # Based on original ActNorm from Kingma and Dhariwal (2018)
 
@@ -21,9 +21,9 @@ export ActNormCV, reset!
 
  *Usage:*
 
- - Forward mode: `Y = AN.forward(X)`
+ - Forward mode: `Y, jac_trace = AN.forward(X)`
 
- - Inverse mode: `X = AN.inverse(Y)`
+ - Inverse mode: `X, jac_trace = AN.inverse(Y)`
 
  - Backward mode: `ΔX, X = AN.backward(ΔY, Y)`
 
@@ -51,6 +51,14 @@ function ActNormCV(k)
     return ActNormCV(k, s, b, false)
 end
 
+## Jacobian trace computation
+# 1D
+jac_trace_forward(nx, s) = nx * sum(s.data)
+# 2D
+jac_trace_forward(nx, ny, s) = nx * ny * sum(s.data)
+# 3D
+jac_trace_forward(nx, ny, nz, s) = nx * ny * nz * sum(s.data)
+
 # 2-3D Forward pass: Input X, Output Y
 function forward(X::AbstractArray{T, N}, AN::ActNormCV) where {T, N}
     inds = [i!=(N-1) ? 1 : Colon() for i=1:N]
@@ -66,7 +74,13 @@ function forward(X::AbstractArray{T, N}, AN::ActNormCV) where {T, N}
     end
     Y = X .* reshape(AN.s.data, inds...) .+ reshape(AN.b.data, inds...)
 
-    return Y
+    # Compute jacobian trace per batch element
+    nn = size(X)[1:N-2]
+    batchsize = size(X)[N]
+    jac_trace = jac_trace_forward(nn..., AN.s)
+    jac_trace_batch = fill(jac_trace, batchsize)
+
+    return Y, jac_trace_batch
 end
 
 # 2-3D Inverse pass: Input Y, Output X
@@ -84,7 +98,13 @@ function inverse(Y::AbstractArray{T, N}, AN::ActNormCV) where {T, N}
     end
     X = (Y .- reshape(AN.b.data, inds...)) ./ reshape(AN.s.data, inds...)
 
-    return X
+    # Compute jacobian trace per batch element
+    nn = size(Y)[1:N-2]
+    batchsize = size(Y)[N]
+    jac_trace = jac_trace_forward(nn..., AN.s)
+    jac_trace_batch = fill(jac_trace, batchsize)
+
+    return X, jac_trace_batch
 end
 
 # 2-3D Backward pass: Input (ΔY, Y), Output (ΔX, X)
@@ -92,7 +112,7 @@ function backward(ΔY::AbstractArray{T, N}, Y::AbstractArray{T, N}, AN::ActNormC
     inds = [i!=(N-1) ? 1 : Colon() for i=1:N]
     dims = collect(1:N-1); dims[end] +=1
 
-    X = inverse(Y, AN)
+    X, _ = inverse(Y, AN)
     ΔX = ΔY .* reshape(AN.s.data, inds...)
     Δs = sum(ΔY .* X, dims=dims)[inds...]
     Δb = sum(ΔY, dims=dims)[inds...]
@@ -112,7 +132,7 @@ function backward_inv(ΔX::AbstractArray{T, N}, X::AbstractArray{T, N}, AN::ActN
     inds = [i!=(N-1) ? 1 : Colon() for i=1:N]
     dims = collect(1:N-1); dims[end] +=1
 
-    Y = forward(X, AN)
+    Y, _ = forward(X, AN)
     ΔY = ΔX ./ reshape(AN.s.data, inds...)
     Δs = -sum(ΔX .* X ./ reshape(AN.s.data, inds...), dims=dims)[inds...]
     Δb = -sum(ΔX ./ reshape(AN.s.data, inds...), dims=dims)[inds...]
@@ -134,7 +154,7 @@ function jacobian(ΔX::AbstractArray{T, N}, Δθ::AbstractArray{Parameter, 1}, X
     Δb = Δθ[2].data
 
     # Forward evaluation
-    Y = forward(X, AN)
+    Y, _ = forward(X, AN)
 
     # Jacobian evaluation
     ΔY = ΔX .* reshape(AN.s.data, inds...) .+ X .* reshape(Δs, inds...) .+ reshape(Δb, inds...)

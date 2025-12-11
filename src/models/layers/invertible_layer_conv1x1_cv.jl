@@ -1,5 +1,6 @@
-# 1x1 convolution operator using Householder matrices (CV version - no logdet)
+# 1x1 convolution operator using Householder matrices (CV version - with jacobian trace)
 # Adapted from Putzky and Welling (2019): https://arxiv.org/abs/1911.10914
+# For Householder reflections, the Jacobian trace is 0 (orthogonal matrices have determinant ±1)
 
 export Conv1x1CV
 
@@ -24,7 +25,7 @@ export Conv1x1CV
 
  *Usage:*
 
- - Forward mode: `Y = C.forward(X)`
+ - Forward mode: `Y, jac_trace = C.forward(X)`
 
  - Backward mode: `ΔX, X = C.backward((ΔY, Y))`
 
@@ -163,6 +164,7 @@ function conv1x1_grad_v(X::AbstractArray{T, N}, ΔY::AbstractArray{T, N},
 end
 
 # Forward pass
+# Note: Householder reflections are orthogonal, so trace of Jacobian = 0
 function forward(X::AbstractArray{T, N}, C::Conv1x1CV) where {T, N}
     Y = cuzeros(X, size(X)...)
     n_in = size(X, N-1)
@@ -176,15 +178,20 @@ function forward(X::AbstractArray{T, N}, C::Conv1x1CV) where {T, N}
         Yi = chain_lr(Xi, v1, v2, v3)
         selectdim(Y, N, i) .= reshape(Yi, size(selectdim(Y, N, i))...)
     end
-    return Y
+
+    # Jacobian trace is 0 for Householder (orthogonal matrix)
+    batchsize = size(X, N)
+    jac_trace_batch = zeros(T, batchsize)
+
+    return Y, jac_trace_batch
 end
 
 # Forward pass and update weights
 function forward(X_tuple::Tuple, C::Conv1x1CV; set_grad::Bool=true)
     ΔX = X_tuple[1]
     X = X_tuple[2]
-    ΔY = forward(ΔX, C)    # forward propagate residual
-    Y = forward(X, C)  # recompute forward state
+    ΔY, _ = forward(ΔX, C)    # forward propagate residual
+    Y, jac_trace = forward(X, C)  # recompute forward state
     Δv1, Δv2, Δv3 = conv1x1_grad_v(Y, ΔX, C; adjoint=true)  # gradient w.r.t. weights
     if set_grad
         isnothing(C.v1.grad) ? (C.v1.grad = Δv1) : (C.v1.grad += Δv1)
@@ -193,7 +200,7 @@ function forward(X_tuple::Tuple, C::Conv1x1CV; set_grad::Bool=true)
     else
         Δθ = [Parameter(Δv1), Parameter(Δv2), Parameter(Δv3)]
     end
-    set_grad ? (return ΔY, Y) : (return ΔY, Δθ, Y)
+    set_grad ? (return ΔY, Y, jac_trace) : (return ΔY, Δθ, Y, jac_trace)
 end
 
 # Inverse pass
@@ -210,15 +217,20 @@ function inverse(Y::AbstractArray{T, N}, C::Conv1x1CV) where {T, N}
         Xi = chain_lr(Yi, v3, v2, v1)
         selectdim(X, N, i) .= reshape(Xi, size(selectdim(X, N, i))...)
     end
-    return X
+
+    # Jacobian trace is 0 for Householder (orthogonal matrix)
+    batchsize = size(Y, N)
+    jac_trace_batch = zeros(T, batchsize)
+
+    return X, jac_trace_batch
 end
 
 # Inverse pass and update weights
 function inverse(Y_tuple::Tuple, C::Conv1x1CV; set_grad::Bool=true)
     ΔY = Y_tuple[1]
     Y = Y_tuple[2]
-    ΔX = inverse(ΔY, C)    # derivative w.r.t. input
-    X = inverse(Y, C)  # recompute forward state
+    ΔX, _ = inverse(ΔY, C)    # derivative w.r.t. input
+    X, jac_trace = inverse(Y, C)  # recompute forward state
 
     # Gradient w.r.t. weights
     Δv1, Δv2, Δv3 = conv1x1_grad_v(X, ΔY, C)
@@ -230,7 +242,7 @@ function inverse(Y_tuple::Tuple, C::Conv1x1CV; set_grad::Bool=true)
         Δθ = [Parameter(Δv1), Parameter(Δv2), Parameter(Δv3)]
     end
 
-    set_grad ? (return ΔX, X) : (return ΔX, Δθ, X)
+    set_grad ? (return ΔX, X, jac_trace) : (return ΔX, Δθ, X, jac_trace)
 end
 
 # Jacobian-related functions
@@ -274,7 +286,7 @@ function jacobianInverse(ΔY::AbstractArray{T, N}, Δθ::Array{Parameter, 1}, Y:
 end
 
 function adjointJacobianInverse(ΔX::AbstractArray{T, N}, X::AbstractArray{T, N}, C::Conv1x1CV) where {T, N}
-    ΔX, Δθinv, X = inverse(C).adjointJacobian(ΔX, X)
+    ΔX, Δθinv, X, _ = inverse(C).adjointJacobian(ΔX, X)
     return ΔX, Δθinv[end:-1:1], X
 end
 
