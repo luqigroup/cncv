@@ -17,8 +17,35 @@ using Statistics
 using ProgressMeter
 using PyPlot
 using Seaborn
-using InvertibleNetworks
-using InvertibleNetworks: ActivationFunction, Squeezer
+using InvertibleNetworks:
+    # Core types
+    ActivationFunction,
+    InvertibleNetwork,
+    NeuralNetLayer,
+    Parameter,
+    Squeezer,
+    # Layer types
+    FluxBlock,
+    ResidualBlock,
+    # Activation functions
+    ReLUlayer,
+    SigmoidLayer,
+    ShuffleLayer,
+    # Tensor operations
+    tensor_cat,
+    tensor_split,
+    # Initialization utilities
+    cuzeros,
+    glorot_uniform,
+    # Conv1x1 utilities
+    chain_lr,
+    # Multi-scale network utilities
+    array_of_array,
+    cat_states,
+    split_states,
+    # Parameter management
+    clear_grad!,
+    get_params
 using CUDA
 
 import Base.*
@@ -35,7 +62,7 @@ include("./models/utils/activation_functions.jl")
 
 # Models
 # Layers
-include("./models/layers/layer_affine.jl")
+# include("./models/layers/layer_affine.jl")
 include("./models/layers/invertible_layer_actnorm.jl")
 include("./models/layers/invertible_layer_conv1x1.jl")
 include("./models/layers/invertible_layer_basic.jl")
