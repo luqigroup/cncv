@@ -4,7 +4,7 @@
 using DrWatson
 @quickactivate :CNCV
 
-using InvertibleNetworks
+using InvertibleNetworks: get_params, clear_grad!
 using Rosenbrock
 using Random
 using ProgressMeter

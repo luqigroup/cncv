@@ -57,7 +57,7 @@ function ActNorm(k; logdet=false)
 end
 
 # 2-3D Foward pass: Input X, Output Y
-function forward(X::AbstractArray{T, N}, AN::ActNorm; logdet=nothing) where {T, N}
+function forward(X::AbstractArray{T, N}, AN::ActNorm; logdet=nothing, logdet_per_batch::Bool=false) where {T, N}
     isnothing(logdet) ? logdet = (AN.logdet && ~AN.is_reversed) : logdet = logdet
     inds = [i!=(N-1) ? 1 : Colon() for i=1:N]
     dims = collect(1:N-1); dims[end] +=1
@@ -73,11 +73,20 @@ function forward(X::AbstractArray{T, N}, AN::ActNorm; logdet=nothing) where {T, 
     Y = X .* reshape(AN.s.data, inds...) .+ reshape(AN.b.data, inds...)
 
     # If logdet true, return as second ouput argument
-    logdet ? (return Y, logdet_forward(size(X)[1:N-2]..., AN.s)) : (return Y)
+    if logdet
+        lgdet = logdet_forward(size(X)[1:N-2]..., AN.s)
+        if logdet_per_batch
+            batchsize = size(X)[N]
+            lgdet = fill(lgdet, batchsize)
+        end
+        return Y, lgdet
+    else
+        return Y
+    end
 end
 
 # 2-3D Inverse pass: Input Y, Output X
-function inverse(Y::AbstractArray{T, N}, AN::ActNorm; logdet=nothing) where {T, N}
+function inverse(Y::AbstractArray{T, N}, AN::ActNorm; logdet=nothing, logdet_per_batch::Bool=false) where {T, N}
     isnothing(logdet) ? logdet = (AN.logdet && AN.is_reversed) : logdet = logdet
     inds = [i!=(N-1) ? 1 : Colon() for i=1:N]
     dims = collect(1:N-1); dims[end] +=1
@@ -93,7 +102,16 @@ function inverse(Y::AbstractArray{T, N}, AN::ActNorm; logdet=nothing) where {T, 
     X = (Y .- reshape(AN.b.data, inds...)) ./ reshape(AN.s.data, inds...)
 
     # If logdet true, return as second ouput argument
-    logdet ? (return X, -logdet_forward(size(Y)[1:N-2]..., AN.s)) : (return X)
+    if logdet
+        lgdet = -logdet_forward(size(Y)[1:N-2]..., AN.s)
+        if logdet_per_batch
+            batchsize = size(Y)[N]
+            lgdet = fill(lgdet, batchsize)
+        end
+        return X, lgdet
+    else
+        return X
+    end
 end
 
 # 2-3D Backward pass: Input (ΔY, Y), Output (ΔY, Y)

@@ -104,20 +104,30 @@ end
 NetworkConditionalGlowCV3D(args; kw...) = NetworkConditionalGlowCV(args...; kw..., ndims=3)
 
 # Forward pass and compute logdet
-function forward(X::AbstractArray{T, N}, C::AbstractArray{T, N}, G::NetworkConditionalGlowCV) where {T, N}
+function forward(X::AbstractArray{T, N}, C::AbstractArray{T, N}, G::NetworkConditionalGlowCV; logdet_per_batch::Bool=false) where {T, N}
     G.split_scales && (Z_save = array_of_array(X, G.L-1))
     orig_shape = size(X)
 
     C = G.AN_C.forward(C)
 
-    logdet = 0
+    if logdet_per_batch
+        batchsize = size(X)[N]
+        logdet = zeros(T, batchsize)
+    else
+        logdet = zero(T)
+    end
+
     for i=1:G.L
         (G.split_scales) && (X = G.squeezer.forward(X))
         (G.split_scales) && (C = G.squeezer.forward(C))
         for j=1:G.K
-            X, logdet1 = G.AN[i, j].forward(X)
-            X, logdet2 = G.CL[i, j].forward(X, C)
-            logdet += (logdet1 + logdet2)
+            X, logdet1 = G.AN[i, j].forward(X; logdet_per_batch=logdet_per_batch)
+            X, logdet2 = G.CL[i, j].forward(X, C; logdet_per_batch=logdet_per_batch)
+            if logdet_per_batch
+                logdet .= logdet .+ logdet1 .+ logdet2
+            else
+                logdet = logdet + logdet1 + logdet2
+            end
         end
         if G.split_scales && i < G.L    # don't split after last iteration
             X, Z = tensor_split(X)

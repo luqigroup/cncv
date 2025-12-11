@@ -91,7 +91,7 @@ end
 ConditionalLayerGlow3D(args...;kw...) = ConditionalLayerGlow(args...; kw..., ndims=3)
 
 # Forward pass: Input X, Output Y
-function forward(X::AbstractArray{T, N}, C::AbstractArray{T, N}, L::ConditionalLayerGlow) where {T,N}
+function forward(X::AbstractArray{T, N}, C::AbstractArray{T, N}, L::ConditionalLayerGlow; logdet_per_batch::Bool=false) where {T,N}
 
     X_ = L.C.forward(X)
     X1, X2 = tensor_split(X_)
@@ -108,11 +108,16 @@ function forward(X::AbstractArray{T, N}, C::AbstractArray{T, N}, L::ConditionalL
 
     Y = tensor_cat(Y1, Y2)
 
-    L.logdet == true ? (return Y, glow_logdet_forward(Sm)) : (return Y)
+    if L.logdet
+        lgdet = glow_logdet_forward(Sm; per_batch=logdet_per_batch)
+        return Y, lgdet
+    else
+        return Y
+    end
 end
 
 # Inverse pass: Input Y, Output X
-function inverse(Y::AbstractArray{T, N}, C::AbstractArray{T, N}, L::ConditionalLayerGlow; save=false) where {T,N}
+function inverse(Y::AbstractArray{T, N}, C::AbstractArray{T, N}, L::ConditionalLayerGlow; save=false, logdet_per_batch::Bool=false) where {T,N}
 
     Y1, Y2 = tensor_split(Y)
 

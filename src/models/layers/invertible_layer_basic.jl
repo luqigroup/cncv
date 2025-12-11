@@ -87,7 +87,7 @@ end
 CouplingLayerBasic3D(args...;kw...) = CouplingLayerBasic(args...; kw..., ndims=3)
 
 # 2D/3D Forward pass: Input X, Output Y
-function forward(X1::AbstractArray{T, N}, X2::AbstractArray{T, N}, L::CouplingLayerBasic; save::Bool=false, logdet=nothing) where {T, N}
+function forward(X1::AbstractArray{T, N}, X2::AbstractArray{T, N}, L::CouplingLayerBasic; save::Bool=false, logdet=nothing, logdet_per_batch::Bool=false) where {T, N}
     isnothing(logdet) ? logdet = (L.logdet && ~L.is_reversed) : logdet = logdet
 
     # Coupling layer
@@ -96,14 +96,15 @@ function forward(X1::AbstractArray{T, N}, X2::AbstractArray{T, N}, L::CouplingLa
     Y2 = S.*X2 + logS_T2
 
     if logdet
-        save ? (return X1, Y2, coupling_logdet_forward(S), logS_T1, S) : (return X1, Y2, coupling_logdet_forward(S))
+        lgdet = coupling_logdet_forward(S; per_batch=logdet_per_batch)
+        save ? (return X1, Y2, lgdet, logS_T1, S) : (return X1, Y2, lgdet)
     else
         save ? (return X1, Y2, logS_T1, S) : (return X1, Y2)
     end
 end
 
 # 2D/3D Inverse pass: Input Y, Output X
-function inverse(Y1::AbstractArray{T, N}, Y2::AbstractArray{T, N}, L::CouplingLayerBasic; save::Bool=false, logdet=nothing) where {T, N}
+function inverse(Y1::AbstractArray{T, N}, Y2::AbstractArray{T, N}, L::CouplingLayerBasic; save::Bool=false, logdet=nothing, logdet_per_batch::Bool=false) where {T, N}
     isnothing(logdet) ? logdet = (L.logdet && L.is_reversed) : logdet = logdet
 
     # Inverse layer
@@ -112,7 +113,8 @@ function inverse(Y1::AbstractArray{T, N}, Y2::AbstractArray{T, N}, L::CouplingLa
     X2 = (Y2 - logS_T2) ./ (S .+ eps(T)) # add epsilon to avoid division by 0
 
     if logdet
-        save == true ? (return Y1, X2, -coupling_logdet_forward(S), logS_T1, S) : (return Y1, X2, -coupling_logdet_forward(S))
+        lgdet = -coupling_logdet_forward(S; per_batch=logdet_per_batch)
+        save == true ? (return Y1, X2, lgdet, logS_T1, S) : (return Y1, X2, lgdet)
     else
         save == true ? (return Y1, X2, logS_T1, S) : (return Y1, X2)
     end
@@ -209,7 +211,7 @@ end
 
 
 ## Logdet utils
-coupling_logdet_forward(S) = sum(log.(abs.(S))) / size(S)[end]
+coupling_logdet_forward(S; per_batch::Bool=false) = per_batch ? dropdims(sum(log.(abs.(S)); dims=tuple(1:ndims(S)-1...)); dims=tuple(1:ndims(S)-1...)) : sum(log.(abs.(S))) / size(S)[end]
 coupling_logdet_backward(S) = 1f0./ S / size(S)[end]
 
 # Set is_reversed flag

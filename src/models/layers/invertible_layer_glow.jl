@@ -101,7 +101,7 @@ end
 CouplingLayerGlowCV3D(args...;kw...) = CouplingLayerGlowCV(args...; kw..., ndims=3)
 
 # Forward pass: Input X, Output Y
-function forward(X::AbstractArray{T, N}, L::CouplingLayerGlowCV) where {T,N}
+function forward(X::AbstractArray{T, N}, L::CouplingLayerGlowCV; logdet_per_batch::Bool=false) where {T,N}
     X_ = L.C.forward(X)
     X1, X2 = tensor_split(X_)
 
@@ -113,11 +113,16 @@ function forward(X::AbstractArray{T, N}, L::CouplingLayerGlowCV) where {T,N}
 
     Y = tensor_cat(Y1, Y2)
 
-    L.logdet == true ? (return Y, glow_logdet_forward(Sm)) : (return Y)
+    if L.logdet
+        lgdet = glow_logdet_forward(Sm; per_batch=logdet_per_batch)
+        return Y, lgdet
+    else
+        return Y
+    end
 end
 
 # Inverse pass: Input Y, Output X
-function inverse(Y::AbstractArray{T, N}, L::CouplingLayerGlowCV; save=false) where {T,N}
+function inverse(Y::AbstractArray{T, N}, L::CouplingLayerGlowCV; save=false, logdet_per_batch::Bool=false) where {T,N}
     Y1, Y2 = tensor_split(Y)
 
     X2 = copy(Y2)
@@ -207,5 +212,5 @@ function adjointJacobian(ΔY::AbstractArray{T, N}, Y::AbstractArray{T, N}, L::Co
 end
 
 # Logdet (correct?)
-glow_logdet_forward(S) = sum(log.(abs.(S))) / size(S)[end]
+glow_logdet_forward(S; per_batch::Bool=false) = per_batch ? dropdims(sum(log.(abs.(S)); dims=tuple(1:ndims(S)-1...)); dims=tuple(1:ndims(S)-1...)) : sum(log.(abs.(S))) / size(S)[end]
 glow_logdet_backward(S) = 1f0./ S / size(S)[end]

@@ -4,7 +4,6 @@
 using DrWatson
 @quickactivate :CNCV
 
-using InvertibleNetworks
 using Rosenbrock
 using Random
 using Distributions
