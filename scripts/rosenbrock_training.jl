@@ -19,7 +19,7 @@ args = parse_input_args(args)
 device = cpu # InvertibleNetworks.CUDA.functional() ? gpu : cpu
 
 # Define network.
-G = NetworkGlowCV(2, args["n_hidden"], args["depth"], args["K"], freeze_conv = false)
+G = NetworkGlow(2, args["n_hidden"], args["depth"], args["K"], freeze_conv = false)
 G = G |> device
 
 # Training data number.

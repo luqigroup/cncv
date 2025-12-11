@@ -25,7 +25,7 @@ end
 save_path = plotsdir(args["sim_name"], savename(args))
 
 # Define network
-G = NetworkGlowCV(2, args["n_hidden"], args["depth"], args["K"], freeze_conv = true)
+G = NetworkGlow(2, args["n_hidden"], args["depth"], args["K"], freeze_conv = true)
 
 # Loading the experiment—only network weights and training loss
 loaded_keys = load_experiment(args, ["G", "fval", "fval_eval"])

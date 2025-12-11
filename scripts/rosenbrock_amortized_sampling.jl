@@ -25,7 +25,7 @@ end
 save_path = plotsdir(args["sim_name"], savename(args))
 
 # Define network
-G = NetworkConditionalGlowCV(
+G = NetworkConditionalGlow(
     2,
     2,
     args["n_hidden"],

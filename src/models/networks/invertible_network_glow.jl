@@ -3,12 +3,12 @@
 # Author: Philipp Witte, pwitte3@gatech.edu
 # Date: February 2020
 
-export NetworkGlowCV, NetworkGlowCV3D
+export NetworkGlow, NetworkGlow3D
 
 """
-    G = NetworkGlowCV(n_in, n_hidden, L, K; k1=3, k2=1, p1=1, p2=0, s1=1, s2=1)
+    G = NetworkGlow(n_in, n_hidden, L, K; k1=3, k2=1, p1=1, p2=0, s1=1, s2=1)
 
-    G = NetworkGlowCV3D(n_in, n_hidden, L, K; k1=3, k2=1, p1=1, p2=0, s1=1, s2=1)
+    G = NetworkGlow3D(n_in, n_hidden, L, K; k1=3, k2=1, p1=1, p2=0, s1=1, s2=1)
 
  Create an invertible network based on the Glow architecture. Each flow step in the inner loop
  consists of an activation normalization layer, followed by an invertible coupling layer with
@@ -61,7 +61,7 @@ export NetworkGlowCV, NetworkGlowCV3D
 
  See also: [`ActNorm`](@ref), [`CouplingLayerGlowCV!`](@ref), [`get_params`](@ref), [`clear_grad!`](@ref)
 """
-struct NetworkGlowCV <: InvertibleNetwork
+struct NetworkGlow <: InvertibleNetwork
     AN::AbstractArray{ActNorm, 2}
     CL::AbstractArray{CouplingLayerGlowCV, 2}
     Z_dims::Union{Array{Array, 1}, Nothing}
@@ -72,10 +72,10 @@ struct NetworkGlowCV <: InvertibleNetwork
     logdet::Bool
 end
 
-@Flux.functor NetworkGlowCV
+@Flux.functor NetworkGlow
 
 # Constructor
-function NetworkGlowCV(n_in, n_hidden, L, K; logdet=true,nx=nothing, dense=false, freeze_conv=false, split_scales=false, k1=3, k2=1, p1=1, p2=0, s1=1, s2=1, ndims=2, squeezer::Squeezer=ShuffleLayer(), activation::ActivationFunction=SigmoidLayer())
+function NetworkGlow(n_in, n_hidden, L, K; logdet=true,nx=nothing, dense=false, freeze_conv=false, split_scales=false, k1=3, k2=1, p1=1, p2=0, s1=1, s2=1, ndims=2, squeezer::Squeezer=ShuffleLayer(), activation::ActivationFunction=SigmoidLayer())
     (n_in == 1) && (split_scales = true) # Need extra channels for coupling layer
     (dense && isnothing(nx)) && error("Dense network needs nx as kwarg input")
 
@@ -100,13 +100,13 @@ function NetworkGlowCV(n_in, n_hidden, L, K; logdet=true,nx=nothing, dense=false
         (i < L && split_scales) && (n_in = Int64(n_in/2); ) # split
     end
 
-    return NetworkGlowCV(AN, CL, Z_dims, L, K, squeezer, split_scales,logdet)
+    return NetworkGlow(AN, CL, Z_dims, L, K, squeezer, split_scales,logdet)
 end
 
-NetworkGlowCV3D(args; kw...) = NetworkGlowCV(args...; kw..., ndims=3)
+NetworkGlow3D(args; kw...) = NetworkGlow(args...; kw..., ndims=3)
 
 # Forward pass and compute logdet
-function forward(X::AbstractArray{T, N}, G::NetworkGlowCV; logdet_per_batch::Bool=false) where {T, N}
+function forward(X::AbstractArray{T, N}, G::NetworkGlow; logdet_per_batch::Bool=false) where {T, N}
     G.split_scales && (Z_save = array_of_array(X, max(G.L-1,1)))
 
     if G.logdet
@@ -146,7 +146,7 @@ function forward(X::AbstractArray{T, N}, G::NetworkGlowCV; logdet_per_batch::Boo
 end
 
 # Inverse pass
-function inverse(Z::AbstractArray{T, N}, G::NetworkGlowCV) where {T, N}
+function inverse(Z::AbstractArray{T, N}, G::NetworkGlow) where {T, N}
     X = Z
     G.split_scales && ((Z_save, X) = split_states(X, G.Z_dims;L_net=G.L))
     for i=G.L:-1:1
@@ -164,7 +164,7 @@ function inverse(Z::AbstractArray{T, N}, G::NetworkGlowCV) where {T, N}
 end
 
 # Backward pass and compute gradients
-function backward(ΔZ::AbstractArray{T, N}, Z::AbstractArray{T, N}, G::NetworkGlowCV; set_grad::Bool=true) where {T, N}
+function backward(ΔZ::AbstractArray{T, N}, Z::AbstractArray{T, N}, G::NetworkGlow; set_grad::Bool=true) where {T, N}
     ΔX = ΔZ
     X = Z
     # Split data and gradients
@@ -209,7 +209,7 @@ end
 
 
 ## Jacobian-related utils
-function jacobian(ΔX::AbstractArray{T, N}, Δθ::Vector{Parameter}, X, G::NetworkGlowCV) where {T, N}
+function jacobian(ΔX::AbstractArray{T, N}, Δθ::Vector{Parameter}, X, G::NetworkGlow) where {T, N}
 
     if G.split_scales
         Z_save = array_of_array(ΔX, G.L-1)
@@ -251,4 +251,4 @@ function jacobian(ΔX::AbstractArray{T, N}, Δθ::Vector{Parameter}, X, G::Netwo
     return ΔX, X, logdet, vcat(ΔθAN, ΔθCL)
 end
 
-adjointJacobian(ΔX::AbstractArray{T, N}, X::AbstractArray{T, N}, G::NetworkGlowCV) where {T, N} = backward(ΔX, X, G; set_grad=false)
+adjointJacobian(ΔX::AbstractArray{T, N}, X::AbstractArray{T, N}, G::NetworkGlow) where {T, N} = backward(ΔX, X, G; set_grad=false)

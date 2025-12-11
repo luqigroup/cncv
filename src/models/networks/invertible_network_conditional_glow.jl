@@ -3,12 +3,12 @@
 # Author: Philipp Witte, pwitte3@gatech.edu
 # Date: February 2020
 
-export NetworkConditionalGlowCV, NetworkConditionalGlowCV3D
+export NetworkConditionalGlow, NetworkConditionalGlow3D
 
 """
-    G = NetworkGlowCV(n_in, n_cond, n_hidden, L, K; k1=3, k2=1, p1=1, p2=0, s1=1, s2=1)
+    G = NetworkGlow(n_in, n_cond, n_hidden, L, K; k1=3, k2=1, p1=1, p2=0, s1=1, s2=1)
 
-    G = NetworkGlowCV3D(n_in, n_cond, n_hidden, L, K; k1=3, k2=1, p1=1, p2=0, s1=1, s2=1)
+    G = NetworkGlow3D(n_in, n_cond, n_hidden, L, K; k1=3, k2=1, p1=1, p2=0, s1=1, s2=1)
 
  Create a conditional invertible network based on the Glow architecture. Each flow step in the inner loop
  consists of an activation normalization layer, followed by an invertible coupling layer with
@@ -61,7 +61,7 @@ export NetworkConditionalGlowCV, NetworkConditionalGlowCV3D
 
  See also: [`ActNorm`](@ref), [`CouplingLayerGlowCV!`](@ref), [`get_params`](@ref), [`clear_grad!`](@ref)
 """
-struct NetworkConditionalGlowCV <: InvertibleNetwork
+struct NetworkConditionalGlow <: InvertibleNetwork
     AN::AbstractArray{ActNorm, 2}
     AN_C::ActNorm
     CL::AbstractArray{ConditionalLayerGlow, 2}
@@ -72,10 +72,10 @@ struct NetworkConditionalGlowCV <: InvertibleNetwork
     split_scales::Bool
 end
 
-@Flux.functor NetworkConditionalGlowCV
+@Flux.functor NetworkConditionalGlow
 
 # Constructor
-function NetworkConditionalGlowCV(n_in, n_cond, n_hidden, L, K; freeze_conv=false,  split_scales=false,  rb_activation::ActivationFunction=ReLUlayer(), k1=3, k2=1, p1=1, p2=0, s1=1, s2=1, ndims=2, squeezer::Squeezer=ShuffleLayer(), activation::ActivationFunction=SigmoidLayer())
+function NetworkConditionalGlow(n_in, n_cond, n_hidden, L, K; freeze_conv=false,  split_scales=false,  rb_activation::ActivationFunction=ReLUlayer(), k1=3, k2=1, p1=1, p2=0, s1=1, s2=1, ndims=2, squeezer::Squeezer=ShuffleLayer(), activation::ActivationFunction=SigmoidLayer())
     AN = Array{ActNorm}(undef, L, K)    # activation normalization
     AN_C = ActNorm(n_cond; logdet=false)    # activation normalization for condition
     CL = Array{ConditionalLayerGlow}(undef, L, K)  # coupling layers w/ 1x1 convolution and residual block
@@ -98,13 +98,13 @@ function NetworkConditionalGlowCV(n_in, n_cond, n_hidden, L, K; freeze_conv=fals
         (i < L && split_scales) && (n_in = Int64(n_in/2)) # split
     end
 
-    return NetworkConditionalGlowCV(AN, AN_C, CL, Z_dims, L, K, squeezer, split_scales)
+    return NetworkConditionalGlow(AN, AN_C, CL, Z_dims, L, K, squeezer, split_scales)
 end
 
-NetworkConditionalGlowCV3D(args; kw...) = NetworkConditionalGlowCV(args...; kw..., ndims=3)
+NetworkConditionalGlow3D(args; kw...) = NetworkConditionalGlow(args...; kw..., ndims=3)
 
 # Forward pass and compute logdet
-function forward(X::AbstractArray{T, N}, C::AbstractArray{T, N}, G::NetworkConditionalGlowCV; logdet_per_batch::Bool=false) where {T, N}
+function forward(X::AbstractArray{T, N}, C::AbstractArray{T, N}, G::NetworkConditionalGlow; logdet_per_batch::Bool=false) where {T, N}
     G.split_scales && (Z_save = array_of_array(X, G.L-1))
     orig_shape = size(X)
 
@@ -140,7 +140,7 @@ function forward(X::AbstractArray{T, N}, C::AbstractArray{T, N}, G::NetworkCondi
 end
 
 # Inverse pass
-function inverse(X::AbstractArray{T, N}, C::AbstractArray{T, N}, G::NetworkConditionalGlowCV) where {T, N}
+function inverse(X::AbstractArray{T, N}, C::AbstractArray{T, N}, G::NetworkConditionalGlow) where {T, N}
     G.split_scales && ((Z_save, X) = split_states(X[:], G.Z_dims))
     for i=G.L:-1:1
         if G.split_scales && i < G.L
@@ -158,7 +158,7 @@ function inverse(X::AbstractArray{T, N}, C::AbstractArray{T, N}, G::NetworkCondi
 end
 
 # Backward pass and compute gradients
-function backward(ΔX::AbstractArray{T, N}, X::AbstractArray{T, N}, C::AbstractArray{T, N}, G::NetworkConditionalGlowCV;) where {T, N}
+function backward(ΔX::AbstractArray{T, N}, X::AbstractArray{T, N}, C::AbstractArray{T, N}, G::NetworkConditionalGlow;) where {T, N}
     # Split data and gradients
     if G.split_scales
         ΔZ_save, ΔX = split_states(ΔX[:], G.Z_dims)

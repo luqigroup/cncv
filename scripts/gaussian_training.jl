@@ -4,6 +4,7 @@
 using DrWatson
 @quickactivate :CNCV
 
+using InvertibleNetworks: get_params, clear_grad!
 using InvertibleNetworks
 using Distributions
 using Random

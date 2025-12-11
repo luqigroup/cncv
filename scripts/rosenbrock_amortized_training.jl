@@ -19,7 +19,7 @@ args = parse_input_args(args)
 device = cpu # InvertibleNetworks.CUDA.functional() ? gpu : cpu
 
 # Define network.
-G = NetworkConditionalGlowCV(
+G = NetworkConditionalGlow(
     2,
     2,
     args["n_hidden"],

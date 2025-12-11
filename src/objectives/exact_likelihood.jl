@@ -7,7 +7,7 @@ export exact_likelihood
 """
 Compute p(X) given X and Net
 """
-function exact_likelihood(Net::NetworkGlowCV, X::AbstractArray{Float32,4})
+function exact_likelihood(Net::NetworkGlow, X::AbstractArray{Float32,4})
 
     Zx, logdet = Net.forward(X; logdet_per_batch=true)
     loglike = sum(Distributions.logpdf(Normal(0f0, 1f0), Zx), dims = [1, 2, 3])[1, 1, 1, :]
@@ -23,7 +23,7 @@ Compute p(x|y) given:
 Zx, _, logdet = Net.forward(X, repeat(Y, 1, 1, 1, size(X, 4)); x_lane=true)
 """
 function exact_likelihood(
-    Net::NetworkConditionalGlowCV,
+    Net::NetworkConditionalGlow,
     X::AbstractArray{Float32,4},
     Y::AbstractArray{Float32,4},
 )
