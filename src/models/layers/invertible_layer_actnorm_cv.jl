@@ -1,4 +1,4 @@
-# Activation normalization layer (CV version - with jacobian trace)
+# Activation normalization layer (CV version - with jacobian trace and gradients)
 # Adapted for compressed sensing applications
 # Based on original ActNorm from Kingma and Dhariwal (2018)
 
@@ -59,6 +59,15 @@ jac_trace_forward(nx, ny, s) = nx * ny * sum(s.data)
 # 3D
 jac_trace_forward(nx, ny, nz, s) = nx * ny * nz * sum(s.data)
 
+## Jacobian trace gradient computation
+# Gradient of jac_trace w.r.t. s: d(trace)/ds = nx * ny * [1, 1, ..., 1]
+# 1D
+jac_trace_backward(nx, s) = nx * ones(eltype(s.data), size(s.data))
+# 2D
+jac_trace_backward(nx, ny, s) = nx * ny * ones(eltype(s.data), size(s.data))
+# 3D
+jac_trace_backward(nx, ny, nz, s) = nx * ny * nz * ones(eltype(s.data), size(s.data))
+
 # 2-3D Forward pass: Input X, Output Y
 function forward(X::AbstractArray{T, N}, AN::ActNormCV) where {T, N}
     inds = [i!=(N-1) ? 1 : Colon() for i=1:N]
@@ -108,9 +117,11 @@ function inverse(Y::AbstractArray{T, N}, AN::ActNormCV) where {T, N}
 end
 
 # 2-3D Backward pass: Input (ΔY, Y), Output (ΔX, X)
+# This computes gradient w.r.t. data (ΔX) and parameters (stored in AN.s.grad, AN.b.grad)
 function backward(ΔY::AbstractArray{T, N}, Y::AbstractArray{T, N}, AN::ActNormCV; set_grad::Bool = true) where {T, N}
     inds = [i!=(N-1) ? 1 : Colon() for i=1:N]
     dims = collect(1:N-1); dims[end] +=1
+    nn = size(Y)[1:N-2]
 
     X, _ = inverse(Y, AN)
     ΔX = ΔY .* reshape(AN.s.data, inds...)
@@ -125,6 +136,19 @@ function backward(ΔY::AbstractArray{T, N}, Y::AbstractArray{T, N}, AN::ActNormC
         Δθ = [Parameter(Δs), Parameter(Δb)]
         return ΔX, Δθ, X
     end
+end
+
+# Compute and store gradient of jacobian trace w.r.t. parameters
+# This will be used later in the overall objective gradient
+function jac_trace_grad!(AN::ActNormCV, X::AbstractArray{T, N}) where {T, N}
+    nn = size(X)[1:N-2]
+
+    # Gradient of jac_trace w.r.t. s
+    ∇s_jac_trace = jac_trace_backward(nn..., AN.s)
+
+    # Store in a separate field or return
+    # For now, we'll return it
+    return ∇s_jac_trace
 end
 
 # 2-3D Backward pass (inverse): Input (ΔX, X), Output (ΔY, Y)

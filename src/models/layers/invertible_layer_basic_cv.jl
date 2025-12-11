@@ -1,4 +1,4 @@
-# Affine coupling layer from Dinh et al. (2017) - CV version (with jacobian trace)
+# Affine coupling layer from Dinh et al. (2017) - CV version (with jacobian trace and gradients)
 # Adapted for compressed sensing applications
 # Author: Philipp Witte, pwitte3@gatech.edu
 # Date: January 2020
@@ -87,6 +87,10 @@ CouplingLayerBasicCV3D(args...;kw...) = CouplingLayerBasicCV(args...; kw..., ndi
 # For coupling layer: jac_trace = sum(S)
 coupling_jac_trace_forward(S) = dropdims(sum(S; dims=tuple(1:ndims(S)-1...)); dims=tuple(1:ndims(S)-1...))
 
+## Jacobian trace gradient computation
+# Gradient of jac_trace w.r.t. S: d(sum(S))/dS = 1 for all elements
+coupling_jac_trace_backward(S) = ones(eltype(S), size(S)) ./ size(S)[end]
+
 # 2D/3D Forward pass: Input X, Output Y
 function forward(X1::AbstractArray{T, N}, X2::AbstractArray{T, N}, L::CouplingLayerBasicCV; save::Bool=false) where {T, N}
 
@@ -140,6 +144,23 @@ function backward(ΔY1::AbstractArray{T, N}, ΔY2::AbstractArray{T, N}, Y1::Abst
     end
 end
 
+# Compute gradient of jacobian trace and return it
+# This computes ∇_θ trace(J) where θ are the parameters of the residual block
+function jac_trace_grad(X1::AbstractArray{T, N}, L::CouplingLayerBasicCV) where {T, N}
+    # Forward through RB to get S
+    logS_T1, _ = tensor_split(L.RB.forward(X1))
+    S = L.activation.forward(logS_T1)
+
+    # Gradient of trace w.r.t. S
+    ∇S_trace = coupling_jac_trace_backward(S)
+
+    # Backpropagate through activation and RB to get gradient w.r.t. parameters
+    ∇logS = backward(∇S_trace, logS_T1, S, L.activation)
+    _, Δθ = L.RB.backward(tensor_cat(∇logS, zero(∇logS)), X1; set_grad=false)
+
+    return Δθ
+end
+
 # 2D/3D Reverse backward pass: Input (ΔX, X), Output (ΔY, Y)
 function backward_inv(ΔX1::AbstractArray{T, N}, ΔX2::AbstractArray{T, N}, X1::AbstractArray{T, N}, X2::AbstractArray{T, N}, L::CouplingLayerBasicCV; set_grad::Bool=true) where {T, N}
 
@@ -149,43 +170,3 @@ function backward_inv(ΔX1::AbstractArray{T, N}, ΔX2::AbstractArray{T, N}, X1::
     # Backpropagate residual
     ΔT = -ΔX2 ./ S
     ΔS = X2 .* ΔT
-
-    if set_grad
-        ΔY1 = L.RB.backward(tensor_cat(backward(ΔS, logS_T1, S, L.activation), ΔT), Y1) + ΔX1
-    else
-        ΔY1, Δθ = L.RB.backward(tensor_cat(backward(ΔS, logS_T1, S, L.activation), ΔT), Y1; set_grad=set_grad)
-        ΔY1 += ΔX1
-    end
-    ΔY2 = -ΔT
-
-    if set_grad
-        return ΔY1, ΔY2, Y1, Y2
-    else
-        return ΔY1, ΔY2, Δθ, Y1, Y2
-    end
-end
-
-# Jacobian-related functions
-function jacobian(ΔX1::AbstractArray{T, N}, ΔX2::AbstractArray{T, N}, Δθ::AbstractArray{Parameter, 1},
-                  X1::AbstractArray{T, N}, X2::AbstractArray{T, N}, L::CouplingLayerBasicCV;
-                  save=false) where {T, N}
-
-    logS_T1, logS_T2 = tensor_split(L.RB.forward(X1))
-    ΔlogS_T1, ΔlogS_T2 = tensor_split(jacobian(ΔX1, Δθ, X1, L.RB)[1])
-    S = L.activation.forward(logS_T1)
-    ΔS = backward(ΔlogS_T1, logS_T1, S, L.activation)
-    Y2 = S.*X2 + logS_T2
-    ΔY2 = ΔS.*X2 + S.*ΔX2 + ΔlogS_T2
-
-    save ? (return ΔX1, ΔY2, X1, Y2, S) : (return ΔX1, ΔY2, X1, Y2)
-end
-
-function adjointJacobian(ΔY1::AbstractArray{T, N}, ΔY2::AbstractArray{T, N}, Y1::AbstractArray{T, N}, Y2::AbstractArray{T, N}, L::CouplingLayerBasicCV) where {T, N}
-    return backward(ΔY1, ΔY2, Y1, Y2, L; set_grad=false)
-end
-
-# Set is_reversed flag
-function tag_as_reversed!(L::CouplingLayerBasicCV, tag::Bool)
-    L.is_reversed = tag
-    return L
-end

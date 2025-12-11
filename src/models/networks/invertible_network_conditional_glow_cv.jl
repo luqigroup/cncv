@@ -1,4 +1,4 @@
-# Invertible network based on Glow (Kingma and Dhariwal, 2018) - CV version (with jacobian trace)
+# Invertible network based on Glow (Kingma and Dhariwal, 2018) - CV version (with jacobian trace and gradients)
 # Includes 1x1 convolution and residual block
 # Adapted for compressed sensing applications
 # Author: Philipp Witte, pwitte3@gatech.edu
@@ -188,4 +188,41 @@ function backward(ΔX::AbstractArray{T, N}, X::AbstractArray{T, N}, C::AbstractA
 
     ΔC, C = G.AN_C.backward(ΔC, C)
     return ΔX, X, ΔC
+end
+
+# Compute gradient of jacobian trace w.r.t. all network parameters
+function jac_trace_grad(X::AbstractArray{T, N}, C::AbstractArray{T, N}, G::NetworkConditionalGlowCV) where {T, N}
+    G.split_scales && (Z_save = array_of_array(X, G.L-1))
+
+    # Gradient for conditioning ActNorm
+    ∇s_an_c = jac_trace_grad!(G.AN_C, C)
+    C, _ = G.AN_C.forward(C)
+
+    ∇θAN_trace = Vector{Any}(undef, 0)
+    ∇θCL_trace = Vector{Any}(undef, 0)
+
+    for i=1:G.L
+        (G.split_scales) && (X = G.squeezer.forward(X))
+        (G.split_scales) && (C = G.squeezer.forward(C))
+        for j=1:G.K
+            # Get gradient of trace w.r.t. ActNorm parameters
+            ∇s_an = jac_trace_grad!(G.AN[i, j], X)
+            push!(∇θAN_trace, ∇s_an)
+
+            X, _ = G.AN[i, j].forward(X)
+
+            # Get gradient of trace w.r.t. ConditionalCouplingLayer parameters
+            ∇θ_cl = jac_trace_grad(X, C, G.CL[i, j])
+            push!(∇θCL_trace, ∇θ_cl)
+
+            X, _ = G.CL[i, j].forward(X, C)
+        end
+        if G.split_scales && i < G.L
+            X, Z = tensor_split(X)
+            Z_save[i] = Z
+            G.Z_dims[i] = collect(size(Z))
+        end
+    end
+
+    return ∇s_an_c, ∇θAN_trace, ∇θCL_trace
 end

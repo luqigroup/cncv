@@ -1,4 +1,4 @@
-# Affine coupling layer from Dinh et al. (2017) - CV version (with jacobian trace)
+# Affine coupling layer from Dinh et al. (2017) - CV version (with jacobian trace and gradients)
 # Includes 1x1 convolution from Putzky and Welling (2019)
 # Adapted for compressed sensing applications
 # Author: Philipp Witte, pwitte3@gatech.edu
@@ -102,6 +102,10 @@ CouplingLayerGlowCV3D(args...;kw...) = CouplingLayerGlowCV(args...; kw..., ndims
 # For glow coupling layer: jac_trace = sum(Sm)
 glow_jac_trace_forward(S) = dropdims(sum(S; dims=tuple(1:ndims(S)-1...)); dims=tuple(1:ndims(S)-1...))
 
+## Jacobian trace gradient computation
+# Gradient of jac_trace w.r.t. Sm: d(sum(Sm))/dSm = 1 for all elements
+glow_jac_trace_backward(S) = ones(eltype(S), size(S)) ./ size(S)[end]
+
 # Forward pass: Input X, Output Y
 function forward(X::AbstractArray{T, N}, L::CouplingLayerGlowCV) where {T,N}
     X_, jac_trace_conv = L.C.forward(X)
@@ -169,6 +173,31 @@ function backward(ΔY::AbstractArray{T, N}, Y::AbstractArray{T, N}, L::CouplingL
         Δθ = cat(Δθc, Δθrb; dims=1)
         return ΔX, Δθ, X
     end
+end
+
+# Compute gradient of jacobian trace and return it
+# This computes ∇_θ trace(J) where θ are the parameters
+function jac_trace_grad(X::AbstractArray{T, N}, L::CouplingLayerGlowCV) where {T,N}
+    X_, _ = L.C.forward(X)
+    X1, X2 = tensor_split(X_)
+
+    # Forward through RB to get Sm
+    logS_T = L.RB.forward(X2)
+    logSm, _ = tensor_split(logS_T)
+    Sm = L.activation.forward(logSm)
+
+    # Gradient of trace w.r.t. Sm
+    ∇Sm_trace = glow_jac_trace_backward(Sm)
+
+    # Backpropagate through activation and RB to get gradient w.r.t. RB parameters
+    ∇logSm = backward(∇Sm_trace, logSm, Sm, L.activation)
+    _, Δθrb = L.RB.backward(tensor_cat(∇logSm, zero(∇logSm)), X2; set_grad=false)
+
+    # Gradient w.r.t. Conv1x1 parameters (always zero for Householder)
+    ∇v1_trace, ∇v2_trace, ∇v3_trace = jac_trace_grad!(L.C, X)
+    Δθc = [Parameter(∇v1_trace), Parameter(∇v2_trace), Parameter(∇v3_trace)]
+
+    return cat(Δθc, Δθrb; dims=1)
 end
 
 # Jacobian-related functions

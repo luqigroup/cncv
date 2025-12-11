@@ -1,4 +1,4 @@
-# Invertible network based on Glow (Kingma and Dhariwal, 2018) - CV version (with jacobian trace)
+# Invertible network based on Glow (Kingma and Dhariwal, 2018) - CV version (with jacobian trace and gradients)
 # Includes 1x1 convolution and residual block
 # Adapted for compressed sensing applications
 # Author: Philipp Witte, pwitte3@gatech.edu
@@ -191,6 +191,38 @@ function backward(ΔZ::AbstractArray{T, N}, Z::AbstractArray{T, N}, G::NetworkGl
         end
     end
     set_grad ? (return ΔX, X) : (return ΔX, vcat(ΔθAN, ΔθCL), X)
+end
+
+# Compute gradient of jacobian trace w.r.t. all network parameters
+function jac_trace_grad(X::AbstractArray{T, N}, G::NetworkGlowCV) where {T, N}
+    G.split_scales && (Z_save = array_of_array(X, max(G.L-1,1)))
+
+    ∇θAN_trace = Vector{Any}(undef, 0)
+    ∇θCL_trace = Vector{Any}(undef, 0)
+
+    for i=1:G.L
+        (G.split_scales) && (X = G.squeezer.forward(X))
+        for j=1:G.K
+            # Get gradient of trace w.r.t. ActNorm parameters
+            ∇s_an = jac_trace_grad!(G.AN[i, j], X)
+            push!(∇θAN_trace, ∇s_an)
+
+            X, _ = G.AN[i, j].forward(X)
+
+            # Get gradient of trace w.r.t. CouplingLayer parameters
+            ∇θ_cl = jac_trace_grad(X, G.CL[i, j])
+            push!(∇θCL_trace, ∇θ_cl)
+
+            X, _ = G.CL[i, j].forward(X)
+        end
+        if G.split_scales && (i < G.L || i == 1)
+            X, Z = tensor_split(X)
+            Z_save[i] = Z
+            G.Z_dims[i] = collect(size(Z))
+        end
+    end
+
+    return ∇θAN_trace, ∇θCL_trace
 end
 
 

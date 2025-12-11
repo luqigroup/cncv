@@ -1,4 +1,4 @@
-# 1x1 convolution operator using Householder matrices (CV version - with jacobian trace)
+# 1x1 convolution operator using Householder matrices (CV version - with jacobian trace and gradients)
 # Adapted from Putzky and Welling (2019): https://arxiv.org/abs/1911.10914
 # For Householder reflections, the Jacobian trace is 0 (orthogonal matrices have determinant ±1)
 
@@ -59,6 +59,18 @@ function Conv1x1CV(v1, v2, v3; freeze=false)
     v2 = Parameter(v2)
     v3 = Parameter(v3)
     return Conv1x1CV(k, v1, v2, v3, freeze)
+end
+
+## Jacobian trace gradient computation
+# For Householder (orthogonal), jac_trace = 0, so gradient is also 0
+function jac_trace_grad!(C::Conv1x1CV, X::AbstractArray{T, N}) where {T, N}
+    k = C.k
+    # Gradient is zero for all parameters
+    ∇v1_jac_trace = zeros(T, k)
+    ∇v2_jac_trace = zeros(T, k)
+    ∇v3_jac_trace = zeros(T, k)
+
+    return ∇v1_jac_trace, ∇v2_jac_trace, ∇v3_jac_trace
 end
 
 function partial_derivative_outer(v::AbstractArray{T, 1}) where T
