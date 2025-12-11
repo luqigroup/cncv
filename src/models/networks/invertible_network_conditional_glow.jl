@@ -59,7 +59,7 @@ export NetworkConditionalGlow, NetworkConditionalGlow3D
  - Trainable parameters in activation normalizations `G.AN[i,j]` and coupling layers `G.C[i,j]`,
    where `i` and `j` range from `1` to `L` and `K` respectively.
 
- See also: [`ActNorm`](@ref), [`CouplingLayerGlowCV!`](@ref), [`get_params`](@ref), [`clear_grad!`](@ref)
+ See also: [`ActNorm`](@ref), [`CouplingLayerGlow!`](@ref), [`get_params`](@ref), [`clear_grad!`](@ref)
 """
 struct NetworkConditionalGlow <: InvertibleNetwork
     AN::AbstractArray{ActNorm, 2}

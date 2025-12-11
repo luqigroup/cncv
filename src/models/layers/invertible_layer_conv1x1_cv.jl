@@ -73,53 +73,6 @@ function jac_trace_grad!(C::Conv1x1CV, X::AbstractArray{T, N}) where {T, N}
     return ∇v1_jac_trace, ∇v2_jac_trace, ∇v3_jac_trace
 end
 
-function partial_derivative_outer(v::AbstractArray{T, 1}) where T
-    k = length(v)
-    out1 = v * v'
-    n = v' * v
-    outer = cuzeros(v, k, k, k)
-    for i=1:k
-        copyto!(view(outer, i, :, :), out1)
-    end
-    broadcast!(*, outer, v, outer)
-    broadcast!(*, outer, -2/n, outer)
-    for j=1:k
-        v1 = view(outer,j, :, j)
-        broadcast!(+, v1, v1, v)
-        v1 = view(outer,j, j, :)
-        broadcast!(+, v1, v1, v)
-    end
-    broadcast!(*, outer, 1/n, outer)
-    return outer
-end
-
-function partial_derivative_outer(v::CuArray{T, 1}) where T
-    k = length(v)
-    out1 = v * v'
-    n = v' * v
-    outer = cuzeros(v, k, k, k)
-    for i=1:k
-        copyto!(view(outer, i, :, :), out1)
-    end
-    broadcast!(*, outer, v, outer)
-    broadcast!(*, outer, -2/n, outer)
-    for j=1:k
-        v1 = view(outer,j, :, j)
-        broadcast!(+, v1, v1, v)
-        v1 = view(outer,j, j, :)
-        broadcast!(+, v1, v1, v)
-    end
-    broadcast!(*, outer, 1/n, outer)
-    return outer
-end
-
-function mat_tens_i(out::AbstractVector{T}, Mat::AbstractArray{T, 2},
-                    Tens::AbstractArray{T, 3}, Mat2::AbstractArray{T, 2}) where T
-    # Computes sum( (Mat * tens) .* Mat2) for each element in the batch
-    isa(Mat, CUDA.CuArray) && (Mat2 = CUDA.CuArray(Mat2))
-    copyto!(out, map(i -> dot(Mat * Tens[i, :, :], Mat2), 1:size(Tens, 1)))
-    return out
-end
 
 function conv1x1_grad_v(X::AbstractArray{T, N}, ΔY::AbstractArray{T, N},
                         C::Conv1x1CV; adjoint=false, jac_trace_grad_weight::Union{Nothing, AbstractVector{T}}=nothing) where {T, N}

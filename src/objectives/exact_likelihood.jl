@@ -20,7 +20,6 @@ end
 
 """
 Compute p(x|y) given:
-Zx, _, logdet = Net.forward(X, repeat(Y, 1, 1, 1, size(X, 4)); x_lane=true)
 """
 function exact_likelihood(
     Net::NetworkConditionalGlow,

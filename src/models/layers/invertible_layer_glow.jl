@@ -3,19 +3,19 @@
 # Author: Philipp Witte, pwitte3@gatech.edu
 # Date: January 2020
 
-export CouplingLayerGlowCV, CouplingLayerGlowCV3D
+export CouplingLayerGlow, CouplingLayerGlow3D
 
 
 """
-    CL = CouplingLayerGlowCV(C::Conv1x1, RB::ResidualBlock; logdet=false)
+    CL = CouplingLayerGlow(C::Conv1x1, RB::ResidualBlock; logdet=false)
 
 or
 
-    CL = CouplingLayerGlowCV(n_in, n_hidden; k1=3, k2=1, p1=1, p2=0, s1=1, s2=1, logdet=false, ndims=2) (2D)
+    CL = CouplingLayerGlow(n_in, n_hidden; k1=3, k2=1, p1=1, p2=0, s1=1, s2=1, logdet=false, ndims=2) (2D)
 
-    CL = CouplingLayerGlowCV(n_in, n_hidden; k1=3, k2=1, p1=1, p2=0, s1=1, s2=1, logdet=false, ndims=3) (3D)
+    CL = CouplingLayerGlow(n_in, n_hidden; k1=3, k2=1, p1=1, p2=0, s1=1, s2=1, logdet=false, ndims=3) (3D)
 
-    CL = CouplingLayerGlowCV3D(n_in, n_hidden; k1=3, k2=1, p1=1, p2=0, s1=1, s2=1, logdet=false) (3D)
+    CL = CouplingLayerGlow3D(n_in, n_hidden; k1=3, k2=1, p1=1, p2=0, s1=1, s2=1, logdet=false) (3D)
 
  Create a Real NVP-style invertible coupling layer based on 1x1 convolutions and a residual block.
 
@@ -60,26 +60,26 @@ or
 
  See also: [`Conv1x1`](@ref), [`ResidualBlock`](@ref), [`get_params`](@ref), [`clear_grad!`](@ref)
 """
-struct CouplingLayerGlowCV <: NeuralNetLayer
+struct CouplingLayerGlow <: NeuralNetLayer
     C::Conv1x1
     RB::Union{ResidualBlock, FluxBlock}
     logdet::Bool
     activation::ActivationFunction
 end
 
-@Flux.functor CouplingLayerGlowCV
+@Flux.functor CouplingLayerGlow
 
 # Constructor from 1x1 convolution and residual block
-function CouplingLayerGlowCV(C::Conv1x1, RB::ResidualBlock; logdet=false, activation::ActivationFunction=SigmoidLayer())
+function CouplingLayerGlow(C::Conv1x1, RB::ResidualBlock; logdet=false, activation::ActivationFunction=SigmoidLayer())
     RB.fan == false && throw("Set ResidualBlock.fan == true")
-    return CouplingLayerGlowCV(C, RB, logdet, activation)
+    return CouplingLayerGlow(C, RB, logdet, activation)
 end
 
 # Constructor from 1x1 convolution and residual Flux block
-CouplingLayerGlowCV(C::Conv1x1, RB::FluxBlock; logdet=false, activation::ActivationFunction=SigmoidLayer()) = CouplingLayerGlowCV(C, RB, logdet, activation)
+CouplingLayerGlow(C::Conv1x1, RB::FluxBlock; logdet=false, activation::ActivationFunction=SigmoidLayer()) = CouplingLayerGlow(C, RB, logdet, activation)
 
 # Constructor from input dimensions
-function CouplingLayerGlowCV(n_in::Int64, n_hidden::Int64; nx=nothing, dense=false, freeze_conv=false, k1=3, k2=1, p1=1, p2=0, s1=1, s2=1, logdet=false, activation::ActivationFunction=SigmoidLayer(), ndims=2)
+function CouplingLayerGlow(n_in::Int64, n_hidden::Int64; nx=nothing, dense=false, freeze_conv=false, k1=3, k2=1, p1=1, p2=0, s1=1, s2=1, logdet=false, activation::ActivationFunction=SigmoidLayer(), ndims=2)
 
     # 1x1 Convolution and residual block for invertible layer
     C = Conv1x1(n_in; freeze=freeze_conv)
@@ -95,13 +95,13 @@ function CouplingLayerGlowCV(n_in::Int64, n_hidden::Int64; nx=nothing, dense=fal
         RB = ResidualBlock(in_chan, n_hidden;n_out=out_chan, k1=k1, k2=k2, p1=p1, p2=p2, s1=s1, s2=s2, fan=true, ndims=ndims)
     end
 
-    return CouplingLayerGlowCV(C, RB, logdet, activation)
+    return CouplingLayerGlow(C, RB, logdet, activation)
 end
 
-CouplingLayerGlowCV3D(args...;kw...) = CouplingLayerGlowCV(args...; kw..., ndims=3)
+CouplingLayerGlow3D(args...;kw...) = CouplingLayerGlow(args...; kw..., ndims=3)
 
 # Forward pass: Input X, Output Y
-function forward(X::AbstractArray{T, N}, L::CouplingLayerGlowCV; logdet_per_batch::Bool=false) where {T,N}
+function forward(X::AbstractArray{T, N}, L::CouplingLayerGlow; logdet_per_batch::Bool=false) where {T,N}
     X_ = L.C.forward(X)
     X1, X2 = tensor_split(X_)
 
@@ -122,7 +122,7 @@ function forward(X::AbstractArray{T, N}, L::CouplingLayerGlowCV; logdet_per_batc
 end
 
 # Inverse pass: Input Y, Output X
-function inverse(Y::AbstractArray{T, N}, L::CouplingLayerGlowCV; save=false, logdet_per_batch::Bool=false) where {T,N}
+function inverse(Y::AbstractArray{T, N}, L::CouplingLayerGlow; save=false, logdet_per_batch::Bool=false) where {T,N}
     Y1, Y2 = tensor_split(Y)
 
     X2 = copy(Y2)
@@ -138,7 +138,7 @@ function inverse(Y::AbstractArray{T, N}, L::CouplingLayerGlowCV; save=false, log
 end
 
 # Backward pass: Input (ΔY, Y), Output (ΔX, X)
-function backward(ΔY::AbstractArray{T, N}, Y::AbstractArray{T, N}, L::CouplingLayerGlowCV; set_grad::Bool=true) where {T,N}
+function backward(ΔY::AbstractArray{T, N}, Y::AbstractArray{T, N}, L::CouplingLayerGlow; set_grad::Bool=true) where {T,N}
 
     # Recompute forward state
     X, X1, X2, logS, S = inverse(Y, L; save=true)
@@ -177,7 +177,7 @@ end
 
 ## Jacobian-related functions
 
-function jacobian(ΔX::AbstractArray{T, N}, Δθ::Array{Parameter, 1}, X, L::CouplingLayerGlowCV) where {T,N}
+function jacobian(ΔX::AbstractArray{T, N}, Δθ::Array{Parameter, 1}, X, L::CouplingLayerGlow) where {T,N}
 
     # Get dimensions
     k = Int(L.C.k/2)
@@ -207,7 +207,7 @@ function jacobian(ΔX::AbstractArray{T, N}, Δθ::Array{Parameter, 1}, X, L::Cou
     L.logdet ? (return ΔY, Y, glow_logdet_forward(Sm), GNΔθ) : (return ΔY, Y)
 end
 
-function adjointJacobian(ΔY::AbstractArray{T, N}, Y::AbstractArray{T, N}, L::CouplingLayerGlowCV) where {T, N}
+function adjointJacobian(ΔY::AbstractArray{T, N}, Y::AbstractArray{T, N}, L::CouplingLayerGlow) where {T, N}
     return backward(ΔY, Y, L; set_grad=false)
 end
 

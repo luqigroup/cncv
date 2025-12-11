@@ -59,11 +59,11 @@ export NetworkGlow, NetworkGlow3D
  - Trainable parameters in activation normalizations `G.AN[i,j]` and coupling layers `G.C[i,j]`,
    where `i` and `j` range from `1` to `L` and `K` respectively.
 
- See also: [`ActNorm`](@ref), [`CouplingLayerGlowCV!`](@ref), [`get_params`](@ref), [`clear_grad!`](@ref)
+ See also: [`ActNorm`](@ref), [`CouplingLayerGlow!`](@ref), [`get_params`](@ref), [`clear_grad!`](@ref)
 """
 struct NetworkGlow <: InvertibleNetwork
     AN::AbstractArray{ActNorm, 2}
-    CL::AbstractArray{CouplingLayerGlowCV, 2}
+    CL::AbstractArray{CouplingLayerGlow, 2}
     Z_dims::Union{Array{Array, 1}, Nothing}
     L::Int64
     K::Int64
@@ -80,7 +80,7 @@ function NetworkGlow(n_in, n_hidden, L, K; logdet=true,nx=nothing, dense=false, 
     (dense && isnothing(nx)) && error("Dense network needs nx as kwarg input")
 
     AN = Array{ActNorm}(undef, L, K)    # activation normalization
-    CL = Array{CouplingLayerGlowCV}(undef, L, K)  # coupling layers w/ 1x1 convolution and residual block
+    CL = Array{CouplingLayerGlow}(undef, L, K)  # coupling layers w/ 1x1 convolution and residual block
 
     if split_scales
         Z_dims = fill!(Array{Array}(undef, max(L-1,1)), [1,1]) #fill in with dummy values so that |> gpu accepts it   # save dimensions for inverse/backward pass
@@ -95,7 +95,7 @@ function NetworkGlow(n_in, n_hidden, L, K; logdet=true,nx=nothing, dense=false, 
         (dense && split_scales) && (nx = Int64(nx/2))
         for j=1:K
             AN[i, j] = ActNorm(n_in; logdet=logdet)
-            CL[i, j] = CouplingLayerGlowCV(n_in, n_hidden; nx=nx, dense=dense, freeze_conv=freeze_conv, k1=k1, k2=k2, p1=p1, p2=p2, s1=s1, s2=s2, logdet=logdet, activation=activation, ndims=ndims)
+            CL[i, j] = CouplingLayerGlow(n_in, n_hidden; nx=nx, dense=dense, freeze_conv=freeze_conv, k1=k1, k2=k2, p1=p1, p2=p2, s1=s1, s2=s2, logdet=logdet, activation=activation, ndims=ndims)
         end
         (i < L && split_scales) && (n_in = Int64(n_in/2); ) # split
     end
