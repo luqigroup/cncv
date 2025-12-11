@@ -1,4 +1,4 @@
-# 1x1 convolution operator using Householder matrices (CV version - with jacobian trace and gradients)
+# 1x1 convolution operator using Householder matrices (CV version - with jacobian trace and integrated gradients)
 # Adapted from Putzky and Welling (2019): https://arxiv.org/abs/1911.10914
 # For Householder reflections, the Jacobian trace is 0 (orthogonal matrices have determinant ±1)
 
@@ -27,7 +27,7 @@ export Conv1x1CV
 
  - Forward mode: `Y, jac_trace = C.forward(X)`
 
- - Backward mode: `ΔX, X = C.backward((ΔY, Y))`
+ - Backward mode: `ΔX, X = C.backward((ΔY, Y); jac_trace_grad_weight=nothing)`
 
  *Trainable parameters:*
 
@@ -122,7 +122,7 @@ function mat_tens_i(out::AbstractVector{T}, Mat::AbstractArray{T, 2},
 end
 
 function conv1x1_grad_v(X::AbstractArray{T, N}, ΔY::AbstractArray{T, N},
-                        C::Conv1x1CV; adjoint=false) where {T, N}
+                        C::Conv1x1CV; adjoint=false, jac_trace_grad_weight::Union{Nothing, AbstractVector{T}}=nothing) where {T, N}
 
     # Reshape input
     v1 = C.v1.data
@@ -172,6 +172,16 @@ function conv1x1_grad_v(X::AbstractArray{T, N}, ΔY::AbstractArray{T, N},
         broadcast!(+, dv2, dv2, mat_tens_i(prod_res, Xi, dV2, ΔYi))
         broadcast!(+, dv3, dv3, mat_tens_i(prod_res, Xi, dV3, ΔYi))
     end
+
+    # Add jacobian trace gradient if provided (always zero for Householder, but kept for consistency)
+    if !isnothing(jac_trace_grad_weight)
+        ∇v1_trace, ∇v2_trace, ∇v3_trace = jac_trace_grad!(C, X)
+        trace_weight_sum = sum(jac_trace_grad_weight)
+        dv1 += trace_weight_sum * ∇v1_trace
+        dv2 += trace_weight_sum * ∇v2_trace
+        dv3 += trace_weight_sum * ∇v3_trace
+    end
+
     return dv1, dv2, dv3
 end
 
@@ -199,12 +209,16 @@ function forward(X::AbstractArray{T, N}, C::Conv1x1CV) where {T, N}
 end
 
 # Forward pass and update weights
-function forward(X_tuple::Tuple, C::Conv1x1CV; set_grad::Bool=true)
+function forward(X_tuple::Tuple, C::Conv1x1CV; set_grad::Bool=true, jac_trace_grad_weight::Union{Nothing, AbstractVector}=nothing)
     ΔX = X_tuple[1]
     X = X_tuple[2]
     ΔY, _ = forward(ΔX, C)    # forward propagate residual
     Y, jac_trace = forward(X, C)  # recompute forward state
-    Δv1, Δv2, Δv3 = conv1x1_grad_v(Y, ΔX, C; adjoint=true)  # gradient w.r.t. weights
+
+    T = eltype(X)
+    jtgw = isnothing(jac_trace_grad_weight) ? nothing : convert(AbstractVector{T}, jac_trace_grad_weight)
+    Δv1, Δv2, Δv3 = conv1x1_grad_v(Y, ΔX, C; adjoint=true, jac_trace_grad_weight=jtgw)
+
     if set_grad
         isnothing(C.v1.grad) ? (C.v1.grad = Δv1) : (C.v1.grad += Δv1)
         isnothing(C.v2.grad) ? (C.v2.grad = Δv2) : (C.v2.grad += Δv2)
@@ -238,14 +252,17 @@ function inverse(Y::AbstractArray{T, N}, C::Conv1x1CV) where {T, N}
 end
 
 # Inverse pass and update weights
-function inverse(Y_tuple::Tuple, C::Conv1x1CV; set_grad::Bool=true)
+function inverse(Y_tuple::Tuple, C::Conv1x1CV; set_grad::Bool=true, jac_trace_grad_weight::Union{Nothing, AbstractVector}=nothing)
     ΔY = Y_tuple[1]
     Y = Y_tuple[2]
     ΔX, _ = inverse(ΔY, C)    # derivative w.r.t. input
     X, jac_trace = inverse(Y, C)  # recompute forward state
 
     # Gradient w.r.t. weights
-    Δv1, Δv2, Δv3 = conv1x1_grad_v(X, ΔY, C)
+    T = eltype(Y)
+    jtgw = isnothing(jac_trace_grad_weight) ? nothing : convert(AbstractVector{T}, jac_trace_grad_weight)
+    Δv1, Δv2, Δv3 = conv1x1_grad_v(X, ΔY, C; jac_trace_grad_weight=jtgw)
+
     if set_grad
         isnothing(C.v1.grad) ? (C.v1.grad = Δv1) : (C.v1.grad += Δv1)
         isnothing(C.v2.grad) ? (C.v2.grad = Δv2) : (C.v2.grad += Δv2)

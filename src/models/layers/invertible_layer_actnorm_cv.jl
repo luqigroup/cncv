@@ -1,4 +1,4 @@
-# Activation normalization layer (CV version - with jacobian trace and gradients)
+# Activation normalization layer (CV version - with jacobian trace and integrated gradients)
 # Adapted for compressed sensing applications
 # Based on original ActNorm from Kingma and Dhariwal (2018)
 
@@ -25,7 +25,7 @@ export ActNormCV, reset!
 
  - Inverse mode: `X, jac_trace = AN.inverse(Y)`
 
- - Backward mode: `ΔX, X = AN.backward(ΔY, Y)`
+ - Backward mode: `ΔX, X = AN.backward(ΔY, Y; jac_trace_grad_weight=nothing)`
 
  *Trainable parameters:*
 
@@ -117,56 +117,75 @@ function inverse(Y::AbstractArray{T, N}, AN::ActNormCV) where {T, N}
 end
 
 # 2-3D Backward pass: Input (ΔY, Y), Output (ΔX, X)
-# This computes gradient w.r.t. data (ΔX) and parameters (stored in AN.s.grad, AN.b.grad)
-function backward(ΔY::AbstractArray{T, N}, Y::AbstractArray{T, N}, AN::ActNormCV; set_grad::Bool = true) where {T, N}
+# jac_trace_grad_weight: scalar weight for jacobian trace gradient (one per batch element)
+function backward(ΔY::AbstractArray{T, N}, Y::AbstractArray{T, N}, AN::ActNormCV;
+                  set_grad::Bool = true, jac_trace_grad_weight::Union{Nothing, AbstractVector{T}}=nothing) where {T, N}
     inds = [i!=(N-1) ? 1 : Colon() for i=1:N]
     dims = collect(1:N-1); dims[end] +=1
     nn = size(Y)[1:N-2]
 
     X, _ = inverse(Y, AN)
     ΔX = ΔY .* reshape(AN.s.data, inds...)
-    Δs = sum(ΔY .* X, dims=dims)[inds...]
+
+    # Data gradient
+    Δs_data = sum(ΔY .* X, dims=dims)[inds...]
     Δb = sum(ΔY, dims=dims)[inds...]
 
+    # Add jacobian trace gradient if provided
+    if !isnothing(jac_trace_grad_weight)
+        ∇s_trace = jac_trace_backward(nn..., AN.s)
+        # Weight by batch element and sum over batch
+        trace_weight_sum = sum(jac_trace_grad_weight)
+        Δs_data += trace_weight_sum * ∇s_trace
+    end
+
     if set_grad
-        AN.s.grad = Δs
+        AN.s.grad = Δs_data
         AN.b.grad = Δb
         return ΔX, X
     else
-        Δθ = [Parameter(Δs), Parameter(Δb)]
+        Δθ = [Parameter(Δs_data), Parameter(Δb)]
         return ΔX, Δθ, X
     end
 end
 
-# Compute and store gradient of jacobian trace w.r.t. parameters
-# This will be used later in the overall objective gradient
+# Compute and return gradient of jacobian trace w.r.t. parameters
 function jac_trace_grad!(AN::ActNormCV, X::AbstractArray{T, N}) where {T, N}
     nn = size(X)[1:N-2]
 
     # Gradient of jac_trace w.r.t. s
     ∇s_jac_trace = jac_trace_backward(nn..., AN.s)
 
-    # Store in a separate field or return
-    # For now, we'll return it
     return ∇s_jac_trace
 end
 
 # 2-3D Backward pass (inverse): Input (ΔX, X), Output (ΔY, Y)
-function backward_inv(ΔX::AbstractArray{T, N}, X::AbstractArray{T, N}, AN::ActNormCV; set_grad::Bool = true) where {T, N}
+function backward_inv(ΔX::AbstractArray{T, N}, X::AbstractArray{T, N}, AN::ActNormCV;
+                      set_grad::Bool = true, jac_trace_grad_weight::Union{Nothing, AbstractVector{T}}=nothing) where {T, N}
     inds = [i!=(N-1) ? 1 : Colon() for i=1:N]
     dims = collect(1:N-1); dims[end] +=1
+    nn = size(X)[1:N-2]
 
     Y, _ = forward(X, AN)
     ΔY = ΔX ./ reshape(AN.s.data, inds...)
-    Δs = -sum(ΔX .* X ./ reshape(AN.s.data, inds...), dims=dims)[inds...]
+
+    # Data gradient
+    Δs_data = -sum(ΔX .* X ./ reshape(AN.s.data, inds...), dims=dims)[inds...]
     Δb = -sum(ΔX ./ reshape(AN.s.data, inds...), dims=dims)[inds...]
 
+    # Add jacobian trace gradient if provided
+    if !isnothing(jac_trace_grad_weight)
+        ∇s_trace = jac_trace_backward(nn..., AN.s)
+        trace_weight_sum = sum(jac_trace_grad_weight)
+        Δs_data += trace_weight_sum * ∇s_trace
+    end
+
     if set_grad
-        AN.s.grad = Δs
+        AN.s.grad = Δs_data
         AN.b.grad = Δb
         return ΔY, Y
     else
-        Δθ = [Parameter(Δs), Parameter(Δb)]
+        Δθ = [Parameter(Δs_data), Parameter(Δb)]
         return ΔY, Δθ, Y
     end
 end

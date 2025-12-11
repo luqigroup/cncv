@@ -1,8 +1,44 @@
-# Invertible network based on Glow (Kingma and Dhariwal, 2018) - CV version (with jacobian trace and gradients)
+# Invertible network based on Glow (Kingma and Dhariwal, 2018) - CV version (with jacobian trace and integrated gradients)
 # Includes 1x1 convolution and residual block
 # Adapted for compressed sensing applications
 # Author: Philipp Witte, pwitte3@gatech.edu
 # Date: February 2020
+
+
+# # Forward pass
+# Y, jac_trace = network.forward(X)
+
+# # Compute your objective: loss = ||target - jac_trace - a'*Y||²
+# # Get gradient weight: jac_trace_grad_weight = -2 * (target - jac_trace - a'*Y)
+
+# # Backward pass with integrated gradients
+# # Data gradient: ΔY = -2 * (target - jac_trace - a'*Y) * (-a)
+# # Total gradient = J^T * ΔY + jac_trace_grad_weight * ∇_θ trace(J)
+# ΔX, X = network.backward(ΔY, Y; jac_trace_grad_weight=jac_trace_grad_weight)
+
+
+# # Compute residual
+# residual = target - jac_trace - a'*Y  # or: target - jac_trace - dot(a, Y)
+
+# # Gradient weight for jacobian trace
+# jac_trace_grad_weight = -2 * residual  # shape: (batchsize,)
+
+# # Data gradient (this is what you pass to backward)
+# ΔY = -2 * residual * (-a)  # = 2 * residual * a
+# # ΔY has same shape as Y
+
+# # Backward pass
+# ΔX, X = network.backward(ΔY, Y; jac_trace_grad_weight=jac_trace_grad_weight)
+# ```
+
+# The network's `backward` function computes:
+# - **Data term**: `J^T * ΔY` (where `ΔY = 2 * residual * a`)
+# - **Trace term**: `jac_trace_grad_weight * ∇_θ trace(J)` (where `jac_trace_grad_weight = -2 * residual`)
+
+# So the complete gradient is:
+# ```
+# ∇_θ L = J^T * (2 * residual * a) + (-2 * residual) * ∇_θ trace(J)
+#       = 2 * residual * (J^T * a - ∇_θ trace(J))
 
 export NetworkGlowCV, NetworkGlowCV3D
 
@@ -49,7 +85,7 @@ export NetworkGlowCV, NetworkGlowCV3D
 
  - Forward mode: `Y, jac_trace = G.forward(X)`
 
- - Backward mode: `ΔX, X = G.backward(ΔY, Y)`
+ - Backward mode: `ΔX, X = G.backward(ΔY, Y; jac_trace_grad_weight=nothing)`
 
  *Trainable parameters:*
 
@@ -154,7 +190,9 @@ function inverse(Z::AbstractArray{T, N}, G::NetworkGlowCV) where {T, N}
 end
 
 # Backward pass and compute gradients
-function backward(ΔZ::AbstractArray{T, N}, Z::AbstractArray{T, N}, G::NetworkGlowCV; set_grad::Bool=true) where {T, N}
+# jac_trace_grad_weight: per-batch weight for jacobian trace gradient
+function backward(ΔZ::AbstractArray{T, N}, Z::AbstractArray{T, N}, G::NetworkGlowCV;
+                  set_grad::Bool=true, jac_trace_grad_weight::Union{Nothing, AbstractVector{T}}=nothing) where {T, N}
     ΔX = ΔZ
     X = Z
     # Split data and gradients
@@ -175,11 +213,11 @@ function backward(ΔZ::AbstractArray{T, N}, Z::AbstractArray{T, N}, G::NetworkGl
         end
         for j=G.K:-1:1
             if set_grad
-                ΔX, X = G.CL[i, j].backward(ΔX, X)
-                ΔX, X = G.AN[i, j].backward(ΔX, X)
+                ΔX, X = G.CL[i, j].backward(ΔX, X; jac_trace_grad_weight=jac_trace_grad_weight)
+                ΔX, X = G.AN[i, j].backward(ΔX, X; jac_trace_grad_weight=jac_trace_grad_weight)
             else
-                ΔX, Δθcl_ij, X = G.CL[i, j].backward(ΔX, X; set_grad=set_grad)
-                ΔX, Δθan_ij, X = G.AN[i, j].backward(ΔX, X; set_grad=set_grad)
+                ΔX, Δθcl_ij, X = G.CL[i, j].backward(ΔX, X; set_grad=set_grad, jac_trace_grad_weight=jac_trace_grad_weight)
+                ΔX, Δθan_ij, X = G.AN[i, j].backward(ΔX, X; set_grad=set_grad, jac_trace_grad_weight=jac_trace_grad_weight)
                 prepend!(ΔθAN, Δθan_ij)
                 prepend!(ΔθCL, Δθcl_ij)
             end

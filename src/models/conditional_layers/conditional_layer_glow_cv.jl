@@ -1,4 +1,4 @@
-# Conditional coupling layer based on GLOW and cIIN - CV version (with jacobian trace and gradients)
+# Conditional coupling layer based on GLOW and cIIN - CV version (with jacobian trace and integrated gradients)
 # Adapted for compressed sensing applications
 # Date: January 2022
 
@@ -47,7 +47,7 @@ or
 
  - Inverse mode: `X, jac_trace = CL.inverse(Y, C)`
 
- - Backward mode: `ΔX, X, ΔC = CL.backward(ΔY, Y, C)`
+ - Backward mode: `ΔX, X, ΔC = CL.backward(ΔY, Y, C; jac_trace_grad_weight=nothing)`
 
  *Trainable parameters:*
 
@@ -145,7 +145,8 @@ function inverse(Y::AbstractArray{T, N}, C::AbstractArray{T, N}, L::ConditionalL
 end
 
 # Backward pass: Input (ΔY, Y), Output (ΔX, X)
-function backward(ΔY::AbstractArray{T, N}, Y::AbstractArray{T, N}, C::AbstractArray{T, N}, L::ConditionalLayerGlowCV) where {T,N}
+function backward(ΔY::AbstractArray{T, N}, Y::AbstractArray{T, N}, C::AbstractArray{T, N}, L::ConditionalLayerGlowCV;
+                  jac_trace_grad_weight::Union{Nothing, AbstractVector{T}}=nothing) where {T,N}
 
     # Recompute forward state
     X, _, X1, X2, logS, S = inverse(Y, C, L; save=true)
@@ -154,6 +155,15 @@ function backward(ΔY::AbstractArray{T, N}, Y::AbstractArray{T, N}, C::AbstractA
     ΔY1, ΔY2 = tensor_split(ΔY)
     ΔT = copy(ΔY1)
     ΔS = ΔY1 .* X1
+
+    # Add jacobian trace gradient if provided
+    if !isnothing(jac_trace_grad_weight)
+        ∇S_trace = conditional_glow_jac_trace_backward(S)
+        batchsize = size(S)[end]
+        weight_expanded = reshape(jac_trace_grad_weight, ntuple(i -> i == ndims(S) ? batchsize : 1, ndims(S))...)
+        ΔS += weight_expanded .* ∇S_trace
+    end
+
     ΔX1 = ΔY1 .* S
 
     # Backpropagate RB
@@ -162,7 +172,7 @@ function backward(ΔY::AbstractArray{T, N}, Y::AbstractArray{T, N}, C::AbstractA
     ΔX2 += ΔY2
 
     # Backpropagate 1x1 conv
-    ΔX, _, _ = L.C.inverse((tensor_cat(ΔX1, ΔX2), tensor_cat(X1, X2)))
+    ΔX, _, _ = L.C.inverse((tensor_cat(ΔX1, ΔX2), tensor_cat(X1, X2)); jac_trace_grad_weight=jac_trace_grad_weight)
 
     return ΔX, X, ΔC
 end

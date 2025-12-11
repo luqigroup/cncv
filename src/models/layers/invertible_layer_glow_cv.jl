@@ -1,4 +1,4 @@
-# Affine coupling layer from Dinh et al. (2017) - CV version (with jacobian trace and gradients)
+# Affine coupling layer from Dinh et al. (2017) - CV version (with jacobian trace and integrated gradients)
 # Includes 1x1 convolution from Putzky and Welling (2019)
 # Adapted for compressed sensing applications
 # Author: Philipp Witte, pwitte3@gatech.edu
@@ -49,7 +49,7 @@ or
 
  - Inverse mode: `X, jac_trace = CL.inverse(Y)`
 
- - Backward mode: `ΔX, X = CL.backward(ΔY, Y)`
+ - Backward mode: `ΔX, X = CL.backward(ΔY, Y; jac_trace_grad_weight=nothing)`
 
  *Trainable parameters:*
 
@@ -147,7 +147,8 @@ function inverse(Y::AbstractArray{T, N}, L::CouplingLayerGlowCV; save=false) whe
 end
 
 # Backward pass: Input (ΔY, Y), Output (ΔX, X)
-function backward(ΔY::AbstractArray{T, N}, Y::AbstractArray{T, N}, L::CouplingLayerGlowCV; set_grad::Bool=true) where {T,N}
+function backward(ΔY::AbstractArray{T, N}, Y::AbstractArray{T, N}, L::CouplingLayerGlowCV;
+                  set_grad::Bool=true, jac_trace_grad_weight::Union{Nothing, AbstractVector{T}}=nothing) where {T,N}
 
     # Recompute forward state
     X, _, X1, X2, logS, S = inverse(Y, L; save=true)
@@ -156,6 +157,14 @@ function backward(ΔY::AbstractArray{T, N}, Y::AbstractArray{T, N}, L::CouplingL
     ΔY1, ΔY2 = tensor_split(ΔY)
     ΔT = copy(ΔY1)
     ΔS = ΔY1 .* X1
+
+    # Add jacobian trace gradient if provided
+    if !isnothing(jac_trace_grad_weight)
+        ∇S_trace = glow_jac_trace_backward(S)
+        batchsize = size(S)[end]
+        weight_expanded = reshape(jac_trace_grad_weight, ntuple(i -> i == ndims(S) ? batchsize : 1, ndims(S))...)
+        ΔS += weight_expanded .* ∇S_trace
+    end
 
     ΔX1 = ΔY1 .* S
     if set_grad
@@ -166,10 +175,10 @@ function backward(ΔY::AbstractArray{T, N}, Y::AbstractArray{T, N}, L::CouplingL
     end
     ΔX_ = tensor_cat(ΔX1, ΔX2)
     if set_grad
-        ΔX, _, _ = L.C.inverse((ΔX_, tensor_cat(X1, X2)))
+        ΔX, _, _ = L.C.inverse((ΔX_, tensor_cat(X1, X2)); jac_trace_grad_weight=jac_trace_grad_weight)
         return ΔX, X
     else
-        ΔX, Δθc, _, _ = L.C.inverse((ΔX_, tensor_cat(X1, X2)); set_grad=set_grad)
+        ΔX, Δθc, _, _ = L.C.inverse((ΔX_, tensor_cat(X1, X2)); set_grad=set_grad, jac_trace_grad_weight=jac_trace_grad_weight)
         Δθ = cat(Δθc, Δθrb; dims=1)
         return ΔX, Δθ, X
     end

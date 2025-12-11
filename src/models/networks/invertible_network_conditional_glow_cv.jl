@@ -1,4 +1,4 @@
-# Invertible network based on Glow (Kingma and Dhariwal, 2018) - CV version (with jacobian trace and gradients)
+# Invertible network based on Glow (Kingma and Dhariwal, 2018) - CV version (with jacobian trace and integrated gradients)
 # Includes 1x1 convolution and residual block
 # Adapted for compressed sensing applications
 # Author: Philipp Witte, pwitte3@gatech.edu
@@ -51,7 +51,7 @@ export NetworkConditionalGlowCV, NetworkConditionalGlowCV3D
 
  - Forward mode: `ZX, ZC, jac_trace = G.forward(X, C)`
 
- - Backward mode: `ΔX, X, ΔC = G.backward(ΔZX, ZX, ZC)`
+ - Backward mode: `ΔX, X, ΔC = G.backward(ΔZX, ZX, ZC; jac_trace_grad_weight=nothing)`
 
  *Trainable parameters:*
 
@@ -159,7 +159,8 @@ function inverse(X::AbstractArray{T, N}, C::AbstractArray{T, N}, G::NetworkCondi
 end
 
 # Backward pass and compute gradients
-function backward(ΔX::AbstractArray{T, N}, X::AbstractArray{T, N}, C::AbstractArray{T, N}, G::NetworkConditionalGlowCV) where {T, N}
+function backward(ΔX::AbstractArray{T, N}, X::AbstractArray{T, N}, C::AbstractArray{T, N}, G::NetworkConditionalGlowCV;
+                  jac_trace_grad_weight::Union{Nothing, AbstractVector{T}}=nothing) where {T, N}
     # Split data and gradients
     if G.split_scales
         ΔZ_save, ΔX = split_states(ΔX[:], G.Z_dims)
@@ -173,8 +174,8 @@ function backward(ΔX::AbstractArray{T, N}, X::AbstractArray{T, N}, C::AbstractA
             ΔX = tensor_cat(ΔX, ΔZ_save[i])
         end
         for j=G.K:-1:1
-            ΔX, X, ΔC_ = G.CL[i, j].backward(ΔX, X, C)
-            ΔX, X = G.AN[i, j].backward(ΔX, X)
+            ΔX, X, ΔC_ = G.CL[i, j].backward(ΔX, X, C; jac_trace_grad_weight=jac_trace_grad_weight)
+            ΔX, X = G.AN[i, j].backward(ΔX, X; jac_trace_grad_weight=jac_trace_grad_weight)
             ΔC += ΔC_
         end
 
@@ -186,7 +187,7 @@ function backward(ΔX::AbstractArray{T, N}, X::AbstractArray{T, N}, C::AbstractA
         end
     end
 
-    ΔC, C = G.AN_C.backward(ΔC, C)
+    ΔC, C = G.AN_C.backward(ΔC, C; jac_trace_grad_weight=jac_trace_grad_weight)
     return ΔX, X, ΔC
 end
 
