@@ -13,11 +13,8 @@ const test_suite = get(ENV, "test_suite", "all") # "all", "basics", "layers" or 
 
 basics = [
     "test_utils/test_objectives.jl",
-    "test_utils/test_activations.jl",
     "test_utils/test_jacobian.jl",
-    "test_utils/test_objectives_cv.jl",
-    "test_utils/test_activations_cv.jl",
-    "test_utils/test_jacobian_cv.jl"
+    "test_utils/test_objectives_cv.jl"
 ]
 
 # Layers

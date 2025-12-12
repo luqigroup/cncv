@@ -23,6 +23,7 @@ Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 Rosenbrock = "c23fb45c-8f64-40e4-b594-aa994fe44f9b"
 Seaborn = "d2ef9438-c967-53ab-8060-373fdd9e13eb"
 Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+TimerOutputs = "a759f4b9-e2f1-59dc-863e-4aeb61b1ea8f"
 cuDNN = "02a925ec-e4fe-4b08-9a7e-0d78e3d38ccd"
 
 [compat]

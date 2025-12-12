@@ -95,7 +95,7 @@ Random.seed!(202122)
         # Loss function
         function loss(CL, X)
             Y, logdet = CL.forward(X)
-            f = -logdet + 0.5f0*norm(Y)^2f0
+            f = -logdet + 0.5f0*norm(Y)^2f0 / batchsize
             ΔY = Y
             ΔX, _ = CL.backward(ΔY, Y)
             return f, ΔX
