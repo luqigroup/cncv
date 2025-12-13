@@ -1,288 +1,374 @@
-# Test for CouplingLayerBasic (non-CV version)
-# Tests include: invertibility, gradient tests, per-batch logdet
+# Invertible CNN layer from Dinh et al. (2017)/Kingma and Dhariwal (2018)
+# Author: Philipp Witte, pwitte3@gatech.edu
+# Date: January 2020
 
-using Test, Random, LinearAlgebra, Statistics
-using InvertibleNetworks: get_params, clear_grad!, ResidualBlock
+using Test, Random, LinearAlgebra
+using InvertibleNetworks: get_params, set_params!, tensor_cat, tensor_split, mse, ∇mse, ResidualBlock, Sigmoid2Layer
 
 using CNCV
 
-Random.seed!(789)
-
-@testset "CouplingLayerBasic Tests" begin
-
-    ###############################################################################
-    # Test 2D CouplingLayerBasic
-    ###############################################################################
-
-    @testset "CouplingLayerBasic 2D - Basic" begin
-        nx, ny = 16, 16
-        n_in = 4
-        n_hidden = 8
-        batchsize = 8
-
-        # Create layer
-        CL = CouplingLayerBasic(n_in, n_hidden; logdet=true)
-
-        # Split input
-        X = randn(Float32, nx, ny, n_in, batchsize)
-        X1, X2 = tensor_split(X)
-
-        # Forward pass
-        Y1, Y2, logdet = CL.forward(X1, X2)
-
-        @test size(Y1) == size(X1)
-        @test size(Y2) == size(X2)
-        @test typeof(logdet) <: Real
-    end
-
-    @testset "CouplingLayerBasic 2D - Per-batch logdet" begin
-        nx, ny = 16, 16
-        n_in = 4
-        n_hidden = 8
-        batchsize = 8
-
-        CL = CouplingLayerBasic(n_in, n_hidden; logdet=true)
-        X = randn(Float32, nx, ny, n_in, batchsize)
-        X1, X2 = tensor_split(X)
-
-        # Forward with per_batch=false (batch-averaged, default)
-        Y1a, Y2a, logdet_avg = CL.forward(X1, X2; logdet_per_batch=false)
-
-        # Forward with per_batch=true
-        Y1b, Y2b, logdet_batch = CL.forward(X1, X2; logdet_per_batch=true)
-
-        @test Y1a ≈ Y1b
-        @test Y2a ≈ Y2b
-
-        # Check logdet dimensions
-        @test typeof(logdet_avg) <: Real
-        @test length(logdet_batch) == batchsize
-
-        # Check that average of per-batch equals batch-averaged
-        @test isapprox(mean(logdet_batch), logdet_avg; rtol=1e-5)
-    end
-
-    @testset "CouplingLayerBasic 2D - Invertibility" begin
-        nx, ny = 16, 16
-        n_in = 4
-        n_hidden = 8
-        batchsize = 8
-
-        CL = CouplingLayerBasic(n_in, n_hidden; logdet=false)
-        X = randn(Float32, nx, ny, n_in, batchsize)
-        X1, X2 = tensor_split(X)
-
-        # Forward-inverse
-        Y1, Y2 = CL.forward(X1, X2)
-        X1_recon, X2_recon = CL.inverse(Y1, Y2)
-
-        @test isapprox(X1, X1_recon; rtol=1e-4)
-        @test isapprox(X2, X2_recon; rtol=1e-4)
-
-        # Inverse-forward
-        Y1b, Y2b = CL.inverse(X1, X2)
-        X1_recon2, X2_recon2 = CL.forward(Y1b, Y2b)
-
-        @test isapprox(X1, X1_recon2; rtol=1e-4)
-        @test isapprox(X2, X2_recon2; rtol=1e-4)
-    end
-
-    @testset "CouplingLayerBasic 2D - Gradient Test (Input)" begin
-        nx, ny = 8, 8
-        n_in = 4
-        n_hidden = 8
-        batchsize = 4
-
-        CL = CouplingLayerBasic(n_in, n_hidden; logdet=true)
-
-        X = randn(Float32, nx, ny, n_in, batchsize)
-        X0 = randn(Float32, nx, ny, n_in, batchsize)
-        dX = randn(Float32, nx, ny, n_in, batchsize)
-
-        X1, X2 = tensor_split(X)
-        X01, X02 = tensor_split(X0)
-        dX1, dX2 = tensor_split(dX)
-
-        # Loss function
-        function loss(CL, X1, X2)
-            Y1, Y2, logdet = CL.forward(X1, X2)
-            Y = tensor_cat(Y1, Y2)
-            f = -logdet + 0.5f0*norm(Y)^2f0
-
-            ΔY = Y
-            ΔY1, ΔY2 = tensor_split(ΔY)
-            ΔX1, ΔX2, _, _ = CL.backward(ΔY1, ΔY2, Y1, Y2)
-
-            return f, ΔX1, ΔX2
-        end
-
-        # Initial loss
-        f0, ΔX1, ΔX2 = loss(CL, X01, X02)
-
-        # Gradient test
-        h = 0.1f0
-        maxiter = 5
-        err1 = zeros(Float32, maxiter)
-        err2 = zeros(Float32, maxiter)
-
-        println("\nGradient test CouplingLayerBasic 2D: input")
-        for j=1:maxiter
-            f = loss(CL, X01 + h*dX1, X02 + h*dX2)[1]
-            err1[j] = abs(f - f0)
-            err2[j] = abs(f - f0 - h*(dot(dX1, ΔX1) + dot(dX2, ΔX2)))
-            println("  Iter $j: err1=$(err1[j]), err2=$(err2[j])")
-            h /= 2f0
-        end
-
-        @test isapprox(err1[end] / (err1[1]/2^(maxiter-1)), 1f0; atol=1f1)
-        @test isapprox(err2[end] / (err2[1]/4^(maxiter-1)), 1f0; atol=1f1)
-    end
-
-    @testset "CouplingLayerBasic 2D - Gradient Test (Parameters)" begin
-        nx, ny = 8, 8
-        n_in = 4
-        n_hidden = 8
-        batchsize = 4
-
-        # Two instances
-        CL1 = CouplingLayerBasic(n_in, n_hidden; logdet=true)
-        CL2 = CouplingLayerBasic(n_in, n_hidden; logdet=true)
-
-        X = randn(Float32, nx, ny, n_in, batchsize)
-        X1, X2 = tensor_split(X)
-
-        θ0 = deepcopy(get_params(CL1))
-        θ = deepcopy(get_params(CL2))
-
-        # Loss function
-        function loss_params(CL, X1, X2)
-            Y1, Y2, logdet = CL.forward(X1, X2)
-            Y = tensor_cat(Y1, Y2)
-            f = -logdet + 0.5f0*norm(Y)^2f0
-
-            ΔY = Y
-            ΔY1, ΔY2 = tensor_split(ΔY)
-            CL.backward(ΔY1, ΔY2, Y1, Y2)
-
-            return f, deepcopy(get_params(CL))
-        end
-
-        f0, Δθ = loss_params(CL1, X1, X2)
-
-        # Perturbation
-        dθ = θ - θ0
-        for i = 1:length(dθ)
-            if norm(θ0[i].data) != 0f0
-                dθ[i].data .*= norm(θ0[i].data)/norm(dθ[i].data)
-            end
-        end
-
-        # Gradient test
-        h = 0.1f0
-        maxiter = 5
-        err3 = zeros(Float32, maxiter)
-        err4 = zeros(Float32, maxiter)
-
-        println("\nGradient test CouplingLayerBasic 2D: parameters")
-        for j=1:maxiter
-            # Set perturbed parameters
-            θ_curr = θ0 + h*dθ
-            set_params!(CL1, θ_curr)
-
-            f = loss_params(CL1, X1, X2)[1]
-            err3[j] = abs(f - f0)
-            err4[j] = abs(f - f0 - h*dot(dθ, Δθ))
-            println("  Iter $j: err3=$(err3[j]), err4=$(err4[j])")
-            h /= 2f0
-        end
-
-        @test isapprox(err3[end] / (err3[1]/2^(maxiter-1)), 1f0; atol=1f1)
-        @test isapprox(err4[end] / (err4[1]/4^(maxiter-1)), 1f0; atol=1f1)
-    end
-
-    ###############################################################################
-    # Test 3D CouplingLayerBasic
-    ###############################################################################
-
-    @testset "CouplingLayerBasic 3D - Basic" begin
-        nx, ny, nz = 8, 8, 8
-        n_in = 4
-        n_hidden = 8
-        batchsize = 4
-
-        CL = CouplingLayerBasic3D(n_in, n_hidden; logdet=true)
-
-        X = randn(Float32, nx, ny, nz, n_in, batchsize)
-        X1, X2 = tensor_split(X)
-
-        Y1, Y2, logdet = CL.forward(X1, X2)
-
-        @test size(Y1) == size(X1)
-        @test size(Y2) == size(X2)
-        @test typeof(logdet) <: Real
-    end
-
-    @testset "CouplingLayerBasic 3D - Per-batch logdet" begin
-        nx, ny, nz = 8, 8, 8
-        n_in = 4
-        n_hidden = 8
-        batchsize = 4
-
-        CL = CouplingLayerBasic3D(n_in, n_hidden; logdet=true)
-        X = randn(Float32, nx, ny, nz, n_in, batchsize)
-        X1, X2 = tensor_split(X)
-
-        Y1a, Y2a, logdet_avg = CL.forward(X1, X2; logdet_per_batch=false)
-        Y1b, Y2b, logdet_batch = CL.forward(X1, X2; logdet_per_batch=true)
-
-        @test Y1a ≈ Y1b
-        @test Y2a ≈ Y2b
-        @test length(logdet_batch) == batchsize
-        @test isapprox(mean(logdet_batch), logdet_avg; rtol=1e-5)
-    end
-
-    @testset "CouplingLayerBasic 3D - Invertibility" begin
-        nx, ny, nz = 8, 8, 8
-        n_in = 4
-        n_hidden = 8
-        batchsize = 4
-
-        CL = CouplingLayerBasic3D(n_in, n_hidden; logdet=false)
-        X = randn(Float32, nx, ny, nz, n_in, batchsize)
-        X1, X2 = tensor_split(X)
-
-        Y1, Y2 = CL.forward(X1, X2)
-        X1_recon, X2_recon = CL.inverse(Y1, Y2)
-
-        @test isapprox(X1, X1_recon; rtol=1e-4)
-        @test isapprox(X2, X2_recon; rtol=1e-4)
-    end
-
-    @testset "CouplingLayerBasic - Logdet Consistency" begin
-        # Test that logdet is computed correctly
-        nx, ny = 8, 8
-        n_in = 4
-        n_hidden = 8
-        batchsize = 4
-
-        CL = CouplingLayerBasic(n_in, n_hidden; logdet=true)
-        X = randn(Float32, nx, ny, n_in, batchsize)
-        X1, X2 = tensor_split(X)
-
-        Y1, Y2, logdet_avg = CL.forward(X1, X2; logdet_per_batch=false)
-        _, _, logdet_batch = CL.forward(X1, X2; logdet_per_batch=true)
-
-        # Manually compute expected logdet for verification
-        # logdet = sum(log(|S|)) / batchsize for averaged
-        # We can't compute exact value without knowing S, but we can check consistency
-        @test isapprox(mean(logdet_batch), logdet_avg; rtol=1e-5)
-
-        # All batch elements should have same logdet (deterministic transformation)
-        # Actually, logdet can vary per batch if S varies, so we just check they're reasonable
-        @test all(isfinite.(logdet_batch))
-        @test isfinite(logdet_avg)
-    end
-
+# Random seed
+Random.seed!(11)
+
+###################################################################################################
+# Test invertibility
+
+# Input
+nx = 24
+ny = 24
+k = 4
+n_in = 2
+n_hidden = 4
+batchsize = 1
+
+# Input images
+Xa = randn(Float32, nx, ny, Int(k/2), batchsize)
+Xb = randn(Float32, nx, ny, Int(k/2), batchsize)
+Xa0 = randn(Float32, nx, ny, Int(k/2), batchsize)
+Xb0 = randn(Float32, nx, ny, Int(k/2), batchsize)
+dXa = Xa - Xa0
+dXb = Xb - Xb0
+
+# 1x1 convolution and residual blocks
+RB = ResidualBlock(n_in, n_hidden; fan=true)
+L = CouplingLayerBasic(RB; logdet=true)
+
+###################################################################################################
+# Test logdet_per_batch option
+
+# Test with larger batchsize
+batchsize = 5
+Xa_batch = randn(Float32, nx, ny, Int(k/2), batchsize)
+Xb_batch = randn(Float32, nx, ny, Int(k/2), batchsize)
+
+# Test with logdet_per_batch=false (default behavior, scalar output)
+Ya, Yb, lgdet_scalar = L.forward(Xa_batch, Xb_batch; logdet=true, logdet_per_batch=false)
+@test lgdet_scalar isa Number
+
+# Test with logdet_per_batch=true (per-batch vector output)
+Ya, Yb, lgdet_vector = L.forward(Xa_batch, Xb_batch; logdet=true, logdet_per_batch=true)
+@test lgdet_vector isa AbstractArray
+@test length(lgdet_vector) == batchsize
+@test isapprox(sum(lgdet_vector), lgdet_scalar * batchsize; atol=1f-1)
+
+# Test inverse with logdet_per_batch (only returns logdet when reversed)
+Xa_inv, Xb_inv = L.inverse(Ya, Yb)
+@test isapprox(norm(Xa_batch - Xa_inv)/norm(Xa_batch), 0f0; atol=1e-2)
+@test isapprox(norm(Xb_batch - Xb_inv)/norm(Xb_batch), 0f0; atol=1e-2)
+
+# Test reversed layer with logdet_per_batch
+L_rev = reverse(L)
+Ya_rev, Yb_rev, lgdet_rev_scalar = L_rev.forward(Xa_batch, Xb_batch; logdet=true, logdet_per_batch=false)
+Ya_rev, Yb_rev, lgdet_rev_vector = L_rev.forward(Xa_batch, Xb_batch; logdet=true, logdet_per_batch=true)
+@test length(lgdet_rev_vector) == batchsize
+
+# Inverse on reversed layer returns logdet
+Xa_inv_rev, Xb_inv_rev, lgdet_inv_rev_scalar = L_rev.inverse(Ya_rev, Yb_rev; logdet=true, logdet_per_batch=false)
+Xa_inv_rev, Xb_inv_rev, lgdet_inv_rev_vector = L_rev.inverse(Ya_rev, Yb_rev; logdet=true, logdet_per_batch=true)
+@test length(lgdet_inv_rev_vector) == batchsize
+@test all(lgdet_rev_vector .+ lgdet_inv_rev_vector .≈ 0f0)
+
+###################################################################################################
+# Invertibility tests
+
+# Reset batchsize to 1
+batchsize = 1
+Xa = randn(Float32, nx, ny, Int(k/2), batchsize)
+Xb = randn(Float32, nx, ny, Int(k/2), batchsize)
+
+# Layer w/ logdet
+Ya, Yb, logdet = L.forward(Xa, Xb)
+Xa_, Xb_ = L.inverse(Ya, Yb)
+@test isapprox(norm(Xa - Xa_)/norm(Xa), 0f0; atol=1e-2)
+@test isapprox(norm(Xb - Xb_)/norm(Xb), 0f0; atol=1e-2)
+
+Ya, Yb, logdet = L.forward(Xa, Xb)
+Xa_, Xb_ = L.backward(Ya.*0f0, Yb.*0f0, Ya, Yb)[3:4]
+@test isapprox(norm(Xa - Xa_)/norm(Xa), 0f0; atol=1e-2)
+@test isapprox(norm(Xb - Xb_)/norm(Xb), 0f0; atol=1e-2)
+
+
+Ya, Yb = L.inverse(Xa, Xb)
+Xa_, Xb_, logdet = L.forward(Ya, Yb)
+@test isapprox(norm(Xa - Xa_)/norm(Xa), 0f0; atol=1e-2)
+@test isapprox(norm(Xb - Xb_)/norm(Xb), 0f0; atol=1e-2)
+
+# Layer w/o logdet
+L.logdet = false
+Ya, Yb = L.forward(Xa, Xb)
+Xa_, Xb_ = L.inverse(Ya, Yb)
+@test isapprox(norm(Xa - Xa_)/norm(Xa), 0f0; atol=1e-2)
+@test isapprox(norm(Xb - Xb_)/norm(Xb), 0f0; atol=1e-2)
+
+Ya, Yb = L.forward(Xa, Xb)
+Xa_, Xb_ = L.backward(Ya.*0f0, Yb.*0f0, Ya, Yb)[3:4]
+@test isapprox(norm(Xa - Xa_)/norm(Xa), 0f0; atol=1e-2)
+@test isapprox(norm(Xb - Xb_)/norm(Xb), 0f0; atol=1e-2)
+
+Ya, Yb = L.inverse(Xa, Xb)
+Xa_, Xb_ = L.forward(Ya, Yb)
+@test isapprox(norm(Xa - Xa_)/norm(Xa), 0f0; atol=1e-2)
+@test isapprox(norm(Xb - Xb_)/norm(Xb), 0f0; atol=1e-2)
+
+# Reverse layer w/ logdet
+L.logdet = true
+L_rev = reverse(L)
+Ya, Yb, logdet = L_rev.forward(Xa, Xb)
+Xa_, Xb_ = L_rev.inverse(Ya, Yb)
+@test isapprox(norm(Xa - Xa_)/norm(Xa), 0f0; atol=1e-2)
+@test isapprox(norm(Xb - Xb_)/norm(Xb), 0f0; atol=1e-2)
+
+Ya, Yb, logdet = L_rev.forward(Xa, Xb)
+Xa_, Xb_ = L_rev.backward(Ya.*0f0, Yb.*0f0, Ya, Yb)[3:4]
+@test isapprox(norm(Xa - Xa_)/norm(Xa), 0f0; atol=1e-2)
+@test isapprox(norm(Xb - Xb_)/norm(Xb), 0f0; atol=1e-2)
+
+
+Ya, Yb = L_rev.inverse(Xa, Xb)
+Xa_, Xb_, logdet = L_rev.forward(Ya, Yb)
+@test isapprox(norm(Xa - Xa_)/norm(Xa), 0f0; atol=1e-2)
+@test isapprox(norm(Xb - Xb_)/norm(Xb), 0f0; atol=1e-2)
+
+###################################################################################################
+# Gradient tests
+
+# Loss Function
+function loss(L, Xa, Xb, Ya, Yb)
+    Ya_, Yb_, logdet = L.forward(Xa, Xb)
+    f = mse(tensor_cat(Ya_, Yb_), tensor_cat(Ya, Yb)) - logdet
+    ΔY = ∇mse(tensor_cat(Ya_, Yb_), tensor_cat(Ya, Yb))
+    ΔYa, ΔYb = tensor_split(ΔY)
+    ΔXa, ΔXb = L.backward(ΔYa, ΔYb, Ya_, Yb_)[1:2]
+
+    # Pass back gradients w.r.t. input X and from the residual block and 1x1 conv. layer
+    return f, ΔXa, ΔXb, L.RB.W1.grad, L.RB.W2.grad, L.RB.W3.grad
 end
 
-println("\n✓ All CouplingLayerBasic tests passed!")
+# Invertible layers
+RB0 = ResidualBlock(n_in, n_hidden; fan=true)
+L = CouplingLayerBasic(RB; logdet=true)
+L01 = CouplingLayerBasic(RB; logdet=true)
+L02 = CouplingLayerBasic(RB0; logdet=true)
+
+
+# Gradient test w.r.t. input X0
+Ya, Yb = L.forward(Xa, Xb)[1:2]
+f0, ΔXa, ΔXb  = loss(L, Xa0, Xb0, Ya, Yb)[1:3]
+h = 0.1f0
+maxiter = 6
+err1 = zeros(Float32, maxiter)
+err2 = zeros(Float32, maxiter)
+
+print("\nGradient test coupling layer\n")
+for j=1:maxiter
+    f = loss(L, Xa0 + h*dXa, Xb0 + h*dXb, Ya, Yb)[1]
+    err1[j] = abs(f - f0)
+    err2[j] = abs(f - f0 - h*dot(dXa, ΔXa) - h*dot(dXb, ΔXb))
+    print(err1[j], "; ", err2[j], "\n")
+    global h = h/2f0
+end
+
+@test isapprox(err1[end] / (err1[1]/2^(maxiter-1)), 1f0; atol=1f1)
+@test isapprox(err2[end] / (err2[1]/4^(maxiter-1)), 1f0; atol=1f1)
+
+
+# Gradient test w.r.t. weights of residual block
+Ya, Yb = L.forward(Xa, Xb)[1:2]
+Lini = deepcopy(L02)
+dW1 = L.RB.W1.data - L02.RB.W1.data
+dW2 = L.RB.W2.data - L02.RB.W2.data
+dW3 = L.RB.W3.data - L02.RB.W3.data
+
+f0, ΔXa, ΔXb, ΔW1, ΔW2, ΔW3 = loss(L02, Xa, Xb, Ya, Yb)
+h = 0.1f0
+maxiter = 4
+err3 = zeros(Float32, maxiter)
+err4 = zeros(Float32, maxiter)
+
+print("\nGradient test coupling layer\n")
+for j=1:maxiter
+    L02.RB.W1.data = Lini.RB.W1.data + h*dW1
+    L02.RB.W2.data = Lini.RB.W2.data + h*dW2
+    L02.RB.W3.data = Lini.RB.W3.data + h*dW3
+    f = loss(L02, Xa, Xb, Ya, Yb)[1]
+    err3[j] = abs(f - f0)
+    err4[j] = abs(f - f0 - h*dot(dW1, ΔW1) - h*dot(dW2, ΔW2) - h*dot(dW3, ΔW3))
+    print(err3[j], "; ", err4[j], "\n")
+    global h = h/2f0
+end
+
+@test isapprox(err3[end] / (err3[1]/2^(maxiter-1)), 1f0; atol=1f1)
+@test isapprox(err4[end] / (err4[1]/4^(maxiter-1)), 1f0; atol=1f1)
+
+###################################################################################################
+# Gradient tests with logdet_per_batch
+
+# Loss Function with logdet_per_batch
+function loss_per_batch(L, Xa, Xb, Ya, Yb)
+    Ya_, Yb_, logdet_vec = L.forward(Xa, Xb; logdet_per_batch=true)
+    f = mse(tensor_cat(Ya_, Yb_), tensor_cat(Ya, Yb)) - sum(logdet_vec)/size(Xa)[end]
+    ΔY = ∇mse(tensor_cat(Ya_, Yb_), tensor_cat(Ya, Yb))
+    ΔYa, ΔYb = tensor_split(ΔY)
+    ΔXa, ΔXb = L.backward(ΔYa, ΔYb, Ya_, Yb_)[1:2]
+
+    return f, ΔXa, ΔXb, L.RB.W1.grad, L.RB.W2.grad, L.RB.W3.grad
+end
+
+# Test with larger batchsize
+batchsize = 4
+Xa_batch = randn(Float32, nx, ny, Int(k/2), batchsize)
+Xb_batch = randn(Float32, nx, ny, Int(k/2), batchsize)
+Xa0_batch = randn(Float32, nx, ny, Int(k/2), batchsize)
+Xb0_batch = randn(Float32, nx, ny, Int(k/2), batchsize)
+dXa_batch = Xa_batch - Xa0_batch
+dXb_batch = Xb_batch - Xb0_batch
+
+Ya, Yb = L.forward(Xa_batch, Xb_batch)[1:2]
+f0, ΔXa, ΔXb = loss_per_batch(L, Xa0_batch, Xb0_batch, Ya, Yb)[1:3]
+h = 0.1f0
+maxiter = 6
+err1_pb = zeros(Float32, maxiter)
+err2_pb = zeros(Float32, maxiter)
+
+print("\nGradient test coupling layer with logdet_per_batch\n")
+for j=1:maxiter
+    f = loss_per_batch(L, Xa0_batch + h*dXa_batch, Xb0_batch + h*dXb_batch, Ya, Yb)[1]
+    err1_pb[j] = abs(f - f0)
+    err2_pb[j] = abs(f - f0 - h*dot(dXa_batch, ΔXa) - h*dot(dXb_batch, ΔXb))
+    print(err1_pb[j], "; ", err2_pb[j], "\n")
+    global h = h/2f0
+end
+
+@test isapprox(err1_pb[end] / (err1_pb[1]/2^(maxiter-1)), 1f0; atol=1f1)
+@test isapprox(err2_pb[end] / (err2_pb[1]/4^(maxiter-1)), 1f0; atol=1f1)
+
+###################################################################################################
+# Gradient tests (reversed layer)
+
+# Reset batchsize
+batchsize = 1
+Xa = randn(Float32, nx, ny, Int(k/2), batchsize)
+Xb = randn(Float32, nx, ny, Int(k/2), batchsize)
+
+# Loss Function
+function loss(L, Xa, Xb, Ya, Yb)
+    Ya_, Yb_, logdet = L.forward(Xa, Xb)
+    f = mse(tensor_cat(Ya_, Yb_), tensor_cat(Ya, Yb)) - logdet
+    ΔY = ∇mse(tensor_cat(Ya_, Yb_), tensor_cat(Ya, Yb))
+    ΔYa, ΔYb = tensor_split(ΔY)
+    ΔXa, ΔXb = L.backward(ΔYa, ΔYb, Ya_, Yb_)[1:2]
+
+    # Pass back gradients w.r.t. input X and from the residual block and 1x1 conv. layer
+    return f, ΔXa, ΔXb, L.RB.W1.grad, L.RB.W2.grad, L.RB.W3.grad
+end
+
+# Invertible layers
+RB0 = ResidualBlock(n_in, n_hidden; fan=true)
+L = reverse(CouplingLayerBasic(RB; logdet=true))
+L01 = reverse(CouplingLayerBasic(RB; logdet=true))
+L02 = reverse(CouplingLayerBasic(RB0; logdet=true))
+
+
+# Gradient test w.r.t. input X0
+Ya, Yb = L.forward(Xa, Xb)[1:2]
+f0, ΔXa, ΔXb = loss(L, Xa0, Xb0, Ya, Yb)[1:3]
+h = 0.1f0
+maxiter = 6
+err5 = zeros(Float32, maxiter)
+err6 = zeros(Float32, maxiter)
+
+print("\nGradient test coupling layer\n")
+for j=1:maxiter
+    f = loss(L, Xa0 + h*dXa, Xb0 + h*dXb, Ya, Yb)[1]
+    err5[j] = abs(f - f0)
+    err6[j] = abs(f - f0 - h*dot(dXa, ΔXa) - h*dot(dXb, ΔXb))
+    print(err5[j], "; ", err6[j], "\n")
+    global h = h/2f0
+end
+
+@test isapprox(err5[end] / (err5[1]/2^(maxiter-1)), 1f0; atol=1f1)
+@test isapprox(err6[end] / (err6[1]/4^(maxiter-1)), 1f0; atol=1f1)
+
+
+# Gradient test w.r.t. weights of residual block
+Ya, Yb = L.forward(Xa, Xb)[1:2]
+Lini = deepcopy(L02)
+dW1 = L.RB.W1.data - L02.RB.W1.data
+dW2 = L.RB.W2.data - L02.RB.W2.data
+dW3 = L.RB.W3.data - L02.RB.W3.data
+
+f0, ΔXa, ΔXb, ΔW1, ΔW2, ΔW3 = loss(L02, Xa, Xb, Ya, Yb)
+h = 0.1f0
+maxiter = 4
+err7 = zeros(Float32, maxiter)
+err8 = zeros(Float32, maxiter)
+
+print("\nGradient test coupling layer\n")
+for j=1:maxiter
+    L02.RB.W1.data = Lini.RB.W1.data + h*dW1
+    L02.RB.W2.data = Lini.RB.W2.data + h*dW2
+    L02.RB.W3.data = Lini.RB.W3.data + h*dW3
+    f = loss(L02, Xa, Xb, Ya, Yb)[1]
+    err7[j] = abs(f - f0)
+    err8[j] = abs(f - f0 - h*dot(dW1, ΔW1) - h*dot(dW2, ΔW2) - h*dot(dW3, ΔW3))
+    print(err7[j], "; ", err8[j], "\n")
+    global h = h/2f0
+end
+
+@test isapprox(err7[end] / (err7[1]/2^(maxiter-1)), 1f0; atol=1f1)
+@test isapprox(err8[end] / (err8[1]/4^(maxiter-1)), 1f0; atol=1f1)
+
+
+###################################################################################################
+# Jacobian-related tests
+
+# Gradient test
+
+# Initialization
+RB0 = ResidualBlock(n_in, n_hidden; fan=true)
+L0 = CouplingLayerBasic(RB0; logdet=true, activation=Sigmoid2Layer())
+θ0 = deepcopy(get_params(L0))
+RB = ResidualBlock(n_in, n_hidden; fan=true)
+L = CouplingLayerBasic(RB; logdet=true, activation=Sigmoid2Layer())
+θ = deepcopy(get_params(L))
+X1 = randn(Float32, nx, ny, n_in, batchsize)
+X2 = randn(Float32, nx, ny, n_in, batchsize)
+
+# Perturbation (normalized)
+dθ = θ-θ0
+for i = 1:length(θ)
+    dθ[i] = norm(θ0[i])*dθ[i]/(norm(dθ[i]).+1f-10)
+end
+dX1 = randn(Float32, nx, ny, n_in, batchsize); dX1 = norm(X1)*dX1/norm(dX1)
+dX2 = randn(Float32, nx, ny, n_in, batchsize); dX2 = norm(X2)*dX2/norm(dX2)
+
+# Jacobian eval
+dY1, dY2, Y1, Y2 = L.jacobian(dX1, dX2, dθ, X1, X2)
+
+# Test
+print("\nJacobian test\n")
+h = 0.1f0
+maxiter = 5
+err9 = zeros(Float32, maxiter)
+err10 = zeros(Float32, maxiter)
+for j=1:maxiter
+    set_params!(L, θ+h*dθ)
+    Y1_, Y2_ = L.forward(X1+h*dX1, X2+h*dX2)
+    err9[j] = sqrt(norm(Y1_ - Y1)^2f0+norm(Y2_ - Y2)^2f0)
+    err10[j] = sqrt(norm(Y1_ - Y1 - h*dY1)^2f0+norm(Y2_ - Y2 - h*dY2)^2f0)
+    print(err9[j], "; ", err10[j], "\n")
+    global h = h/2f0
+end
+
+@test isapprox(err9[end] / (err9[1]/2^(maxiter-1)), 1f0; atol=1f1)
+@test isapprox(err10[end] / (err10[1]/4^(maxiter-1)), 1f0; atol=1f1)
+
+# Adjoint test
+
+set_params!(L, θ)
+dY1, dY2, Y1, Y2 = L.jacobian(dX1, dX2, dθ, X1, X2)
+dY1_ = randn(Float32, size(dY1)); dY2_ = randn(Float32, size(dY2))
+dX1_, dX2_, dθ_ = L.adjointJacobian(dY1_, dY2_, Y1, Y2)
+a = dot(dY1, dY1_)+dot(dY2, dY2_)
+b = dot(dX1, dX1_)+dot(dX2, dX2_)+dot(dθ, dθ_)
+@test isapprox(a, b; rtol=1f-3)

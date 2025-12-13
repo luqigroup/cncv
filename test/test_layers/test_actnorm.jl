@@ -157,6 +157,25 @@ X_rec_rev = AN_rev.inverse(Y_rev; logdet_per_batch=true)
 @test isequal(size(lgdt_rev_vec), (batchsize,))
 @test all(lgdt_rev_vec + lgdt_vec .≈ 0f0)
 
+
+###############################################################################
+# Test accuracy of logdet with logdet_per_batch option
+
+batchsize = 3
+X = rand(Float32, nx, ny, nc, batchsize)
+AN = ActNorm(nc; logdet=true)
+
+# Test with logdet_per_batch=true
+Y, lgdt_vec = AN.forward(X; logdet_per_batch=true)
+
+
+# Test with logdet_per_batch=true
+AN = ActNorm(nc; logdet=true)
+Y, lgdt = AN.forward(X; logdet_per_batch=false)
+
+@test isapprox(sum(lgdt_vec), lgdt * batchsize; atol=1f-6)
+
+
 ###############################################################################
 # Gradient Test
 

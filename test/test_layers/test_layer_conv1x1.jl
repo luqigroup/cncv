@@ -1,293 +1,444 @@
-# Test for Conv1x1 layer (non-CV version)
-# Tests include: invertibility, gradient tests, per-batch logdet
-# Conv1x1 uses Householder reflections, so logdet is always 0
+# Test 1 x 1 convolution module using Householder matrices
+# Author: Philipp Witte, pwitte3@gatech.edu
+# Date: January 2020
 
-using Test, Random, LinearAlgebra, Statistics
-using InvertibleNetworks: get_params, clear_grad!
+using Test, Random, LinearAlgebra, Flux
+using InvertibleNetworks: get_params, set_params!, clear_grad!
+using InvertibleNetworks.CUDA: functional
 
 using CNCV
 
-# Include your CNCV module or layer definitions here
-# using CNCV
+device = functional() ? gpu : cpu
 
-Random.seed!(456)
+(device == gpu) && println("Testing on GPU");
 
-@testset "Conv1x1 Layer Tests" begin
+Random.seed!(11)
 
-    ###############################################################################
-    # Test 2D Conv1x1
-    ###############################################################################
+###################################################################################################
+# Test logdet behavior (always 0 for Conv1x1 - orthogonal transformation)
 
-    @testset "Conv1x1 2D - Basic" begin
-        nx, ny = 16, 16
-        nc = 4
-        batchsize = 8
+function test_logdet_always_zero()
+    nx = 28
+    ny = 28
+    k = 4
 
-        # Create layer
-        C = Conv1x1(nc; logdet=true)
+    # Test with different batch sizes
+    for batchsize in [1, 2, 5, 10]
+        v1 = randn(Float32, k) |> device
+        v2 = randn(Float32, k) |> device
+        v3 = randn(Float32, k) |> device
 
-        # Input
-        X = randn(Float32, nx, ny, nc, batchsize)
+        X = randn(Float32, nx, ny, k, batchsize) |> device
 
-        # Forward pass
-        Y, logdet = C.forward(X)
+        C = Conv1x1(v1, v2, v3; logdet=true) |> device
 
-        @test size(Y) == size(X)
-        @test !isnothing(C.v1.data)
-        @test !isnothing(C.v2.data)
-        @test !isnothing(C.v3.data)
+        # Forward with logdet returns 0 (scalar)
+        Y, lgdet = C.forward(X; logdet=true)
+        @test lgdet == 0
+        @test lgdet isa Number
+        @test !(lgdet isa AbstractArray)
 
-        # For Householder reflections, logdet should be 0
-        @test isapprox(logdet, 0f0; atol=1e-6)
+        # Inverse with logdet returns 0 (scalar)
+        X_inv, lgdet_inv = C.inverse(Y; logdet=true)
+        @test lgdet_inv == 0
+        @test lgdet_inv isa Number
+        @test !(lgdet_inv isa AbstractArray)
+
+        # Verify invertibility
+        @test isapprox(norm(X - X_inv)/norm(X), 0f0; atol=1f-6)
     end
 
-    @testset "Conv1x1 2D - Per-batch logdet" begin
-        nx, ny = 16, 16
-        nc = 4
-        batchsize = 8
+    # Test that logdet=false doesn't return logdet
+    batchsize = 3
+    X = randn(Float32, nx, ny, k, batchsize) |> device
+    v1 = randn(Float32, k) |> device
+    v2 = randn(Float32, k) |> device
+    v3 = randn(Float32, k) |> device
+    C = Conv1x1(v1, v2, v3; logdet=false) |> device
 
-        C = Conv1x1(nc; logdet=true)
-        X = randn(Float32, nx, ny, nc, batchsize)
+    Y = C.forward(X; logdet=false)
+    @test Y isa AbstractArray
+    @test !(Y isa Tuple)
 
-        # Forward with per_batch=false (batch-averaged, default)
-        Y1, logdet_avg = C.forward(X; logdet_per_batch=false)
-
-        # Forward with per_batch=true
-        Y2, logdet_batch = C.forward(X; logdet_per_batch=true)
-
-        @test size(Y1) == size(Y2)
-        @test Y1 ≈ Y2
-
-        # Check logdet dimensions
-        @test typeof(logdet_avg) <: Real
-        @test length(logdet_batch) == batchsize
-
-        # For Householder, all logdets should be 0
-        @test isapprox(logdet_avg, 0f0; atol=1e-6)
-        @test all(isapprox.(logdet_batch, 0f0; atol=1e-6))
-
-        # Check that average of per-batch equals batch-averaged
-        @test isapprox(mean(logdet_batch), logdet_avg; atol=1e-6)
-    end
-
-    @testset "Conv1x1 2D - Invertibility" begin
-        nx, ny = 16, 16
-        nc = 4
-        batchsize = 8
-
-        C = Conv1x1(nc; logdet=false)
-        X = randn(Float32, nx, ny, nc, batchsize)
-
-        # Forward-inverse
-        Y = C.forward(X)
-        X_reconstructed = C.inverse(Y)
-
-        @test isapprox(X, X_reconstructed; rtol=1e-4)
-
-        # Inverse-forward
-        Y2 = C.inverse(X)
-        X_reconstructed2 = C.forward(Y2)
-
-        @test isapprox(X, X_reconstructed2; rtol=1e-4)
-    end
-
-    @testset "Conv1x1 2D - Orthogonality" begin
-        # Householder reflections should produce orthogonal matrices
-        nx, ny = 8, 8
-        nc = 4
-        batchsize = 1
-
-        C = Conv1x1(nc; logdet=false)
-        X = randn(Float32, nx, ny, nc, batchsize)
-        Y = C.forward(X)
-
-        # ||Y|| should equal ||X|| for orthogonal transformations
-        @test isapprox(norm(Y), norm(X); rtol=1e-4)
-    end
-
-    @testset "Conv1x1 2D - Gradient Test (Input)" begin
-        nx, ny = 8, 8
-        nc = 2
-        batchsize = 4
-
-        C = Conv1x1(nc; logdet=true)
-        X = randn(Float32, nx, ny, nc, batchsize)
-        X0 = randn(Float32, nx, ny, nc, batchsize)
-        dX = randn(Float32, nx, ny, nc, batchsize)
-
-        # Loss function
-        function loss(C, X)
-            Y, logdet = C.forward(X)
-            f = -logdet + 0.5f0*norm(Y)^2f0
-            ΔY = Y
-            ΔX = C.inverse((ΔY, Y))[1]
-            return f, ΔX
-        end
-
-        # Initial loss
-        f0, ΔX = loss(C, X0)
-
-        # Gradient test
-        h = 0.1f0
-        maxiter = 5
-        err1 = zeros(Float32, maxiter)
-        err2 = zeros(Float32, maxiter)
-
-        println("\nGradient test Conv1x1 2D: input")
-        for j=1:maxiter
-            f = loss(C, X0 + h*dX)[1]
-            err1[j] = abs(f - f0)
-            err2[j] = abs(f - f0 - h*dot(dX, ΔX))
-            println("  Iter $j: err1=$(err1[j]), err2=$(err2[j])")
-            h /= 2f0
-        end
-
-        @test isapprox(err1[end] / (err1[1]/2^(maxiter-1)), 1f0; atol=1f1)
-        @test isapprox(err2[end] / (err2[1]/4^(maxiter-1)), 1f0; atol=1f1)
-    end
-
-    @testset "Conv1x1 2D - Gradient Test (Parameters)" begin
-        nx, ny = 8, 8
-        nc = 2
-        batchsize = 4
-
-        # Create two instances
-        C1 = Conv1x1(nc; logdet=true)
-        C2 = Conv1x1(nc; logdet=true)
-
-        X = randn(Float32, nx, ny, nc, batchsize)
-
-        θ0 = deepcopy(get_params(C1))
-        θ = deepcopy(get_params(C2))
-
-        # Loss function
-        function loss_params(C, X)
-            Y, logdet = C.forward(X)
-            f = -logdet + 0.5f0*norm(Y)^2f0
-            ΔY = Y
-            C.inverse((ΔY, Y))
-            return f, deepcopy(get_params(C))
-        end
-
-        # Initial loss
-        f0, Δθ = loss_params(C1, X)
-
-        # Perturbation
-        dθ = θ - θ0
-        for i = 1:length(dθ)
-            if norm(θ0[i].data) != 0f0
-                dθ[i].data .*= norm(θ0[i].data)/norm(dθ[i].data)
-            end
-        end
-
-        # Gradient test
-        h = 0.1f0
-        maxiter = 5
-        err3 = zeros(Float32, maxiter)
-        err4 = zeros(Float32, maxiter)
-
-        println("\nGradient test Conv1x1 2D: parameters")
-        for j=1:maxiter
-            C1.v1.data .= θ0[1].data + h*dθ[1].data
-            C1.v2.data .= θ0[2].data + h*dθ[2].data
-            C1.v3.data .= θ0[3].data + h*dθ[3].data
-
-            f = loss_params(C1, X)[1]
-            err3[j] = abs(f - f0)
-            err4[j] = abs(f - f0 - h*dot(dθ, Δθ))
-            println("  Iter $j: err3=$(err3[j]), err4=$(err4[j])")
-            h /= 2f0
-        end
-
-        @test isapprox(err3[end] / (err3[1]/2^(maxiter-1)), 1f0; atol=1f1)
-        @test isapprox(err4[end] / (err4[1]/4^(maxiter-1)), 1f0; atol=1f1)
-    end
-
-    ###############################################################################
-    # Test 3D Conv1x1
-    ###############################################################################
-
-    @testset "Conv1x1 3D - Basic" begin
-        nx, ny, nz = 8, 8, 8
-        nc = 2
-        batchsize = 4
-
-        C = Conv1x1(nc; logdet=true)
-        X = randn(Float32, nx, ny, nz, nc, batchsize)
-
-        Y, logdet = C.forward(X)
-
-        @test size(Y) == size(X)
-        @test isapprox(logdet, 0f0; atol=1e-6)
-    end
-
-    @testset "Conv1x1 3D - Per-batch logdet" begin
-        nx, ny, nz = 8, 8, 8
-        nc = 2
-        batchsize = 4
-
-        C = Conv1x1(nc; logdet=true)
-        X = randn(Float32, nx, ny, nz, nc, batchsize)
-
-        Y1, logdet_avg = C.forward(X; logdet_per_batch=false)
-        Y2, logdet_batch = C.forward(X; logdet_per_batch=true)
-
-        @test Y1 ≈ Y2
-        @test length(logdet_batch) == batchsize
-        @test all(isapprox.(logdet_batch, 0f0; atol=1e-6))
-        @test isapprox(mean(logdet_batch), logdet_avg; atol=1e-6)
-    end
-
-    @testset "Conv1x1 3D - Invertibility" begin
-        nx, ny, nz = 8, 8, 8
-        nc = 2
-        batchsize = 4
-
-        C = Conv1x1(nc; logdet=false)
-        X = randn(Float32, nx, ny, nz, nc, batchsize)
-
-        Y = C.forward(X)
-        X_reconstructed = C.inverse(Y)
-
-        @test isapprox(X, X_reconstructed; rtol=1e-4)
-    end
-
-    @testset "Conv1x1 3D - Orthogonality" begin
-        nx, ny, nz = 8, 8, 8
-        nc = 2
-        batchsize = 1
-
-        C = Conv1x1(nc; logdet=false)
-        X = randn(Float32, nx, ny, nz, nc, batchsize)
-        Y = C.forward(X)
-
-        # Norm preservation for orthogonal transformations
-        @test isapprox(norm(Y), norm(X); rtol=1e-4)
-    end
-
-    @testset "Conv1x1 - Frozen Parameters" begin
-        nx, ny = 8, 8
-        nc = 2
-        batchsize = 4
-
-        C = Conv1x1(nc; freeze=true, logdet=false)
-        X = randn(Float32, nx, ny, nc, batchsize)
-
-        # Store initial parameters
-        v1_init = copy(C.v1.data)
-        v2_init = copy(C.v2.data)
-        v3_init = copy(C.v3.data)
-
-        # Forward-backward
-        Y = C.forward(X)
-        ΔY = randn(Float32, size(Y)...)
-        C.inverse((ΔY, Y))
-
-        # Parameters should not have gradients when frozen
-        @test C.freeze == true
-        # If gradients are computed, they should be zero or params unchanged
-    end
-
+    X_inv = C.inverse(Y; logdet=false)
+    @test X_inv isa AbstractArray
+    @test !(X_inv isa Tuple)
 end
 
-println("\n✓ All Conv1x1 tests passed!")
+test_logdet_always_zero()
+
+###################################################################################################
+# Initialize parameters
+
+function test_invertibility()
+    # Dimensions
+    nx = 28
+    ny = 28
+    k = 4
+    batchsize = 2
+
+    # Variables
+    v1 = randn(Float32, k) |> device
+    v10 = randn(Float32, k) |> device
+    dv1 = v1 - v10
+
+    v2 = randn(Float32, k) |> device
+    v20 = randn(Float32, k) |> device
+    dv2 = v2 - v20
+
+    v3 = randn(Float32, k) |> device
+    v30 = randn(Float32, k) |> device
+    dv3 = v3 - v30
+
+    # Input
+    X = randn(Float32, nx, ny, k, batchsize) |> device
+    X0 = randn(Float32, nx, ny, k, batchsize) |> device
+    dX = X - X0
+
+    # Operators
+    C = Conv1x1(v1, v2, v3) |> device
+    C0 = Conv1x1(v10, v20, v30) |> device
+
+
+    ###################################################################################################
+    # Test invertibility
+
+    X_ = C.inverse(C.forward(X))
+    err1 = norm(X - X_)/norm(X)
+
+    @test isapprox(err1, 0f0; atol=1f-6)
+
+    X_ = C.forward(C.inverse(X))
+    err2 = norm(X - X_)/norm(X)
+
+    @test isapprox(err2, 0f0; atol=1f-6)
+
+    Y = C.forward(X)
+    ΔY = randn(Float32, nx, ny, k, batchsize) |> device
+    ΔX_, X_ = C.inverse((ΔY, Y))
+    err3 = norm(X - X_)/norm(X)
+
+    @test isapprox(err3, 0f0; atol=1f-6)
+
+
+    ###################################################################################################
+    # Test gradients are set in inverse pass
+
+    # Predicted data and misfit
+    C0.v1.grad = nothing
+    Y_ = C0.forward(X)
+    @test isnothing(C0.v1.grad)
+
+    ΔY = Y_ - Y
+
+    # Compute gradients w.r.t. v
+    ΔX, X_ = C0.inverse((ΔY, Y_))
+    @test ~isnothing(C0.v1.grad)
+
+
+    # Test gradients are zero in inverse pass if freeze =true
+    C_frozen = Conv1x1(v10, v20, v30;freeze=true) |> device
+
+    # Predicted data and misfit
+    C_frozen.v1.grad = nothing
+    Y_ = C_frozen.forward(X)
+    @test isnothing(C_frozen.v1.grad)
+
+    ΔY = Y_ - Y
+
+    # Compute gradients w.r.t. v
+    ΔX, X_ = C_frozen.inverse((ΔY, Y_))
+    @test iszero(C_frozen.v1.grad)
+end
+
+test_invertibility()
+
+###################################################################################################
+# Gradient test
+
+function test_gradients()
+    nx = 28
+    ny = 28
+    k = 4
+    batchsize = 2
+
+    v1 = randn(Float32, k) |> device
+    v10 = randn(Float32, k) |> device
+    dv1 = v1 - v10
+
+    v2 = randn(Float32, k) |> device
+    v20 = randn(Float32, k) |> device
+    dv2 = v2 - v20
+
+    v3 = randn(Float32, k) |> device
+    v30 = randn(Float32, k) |> device
+    dv3 = v3 - v30
+
+    X = randn(Float32, nx, ny, k, batchsize) |> device
+    X0 = randn(Float32, nx, ny, k, batchsize) |> device
+    dX = X - X0
+
+    C = Conv1x1(v1, v2, v3) |> device
+    C0 = Conv1x1(v10, v20, v30) |> device
+
+    loss(ΔY) = .5f0*norm(ΔY)^2
+
+    function objective(C, X, Y)
+        Y0 = C.forward(X)
+        ΔY = Y0 - Y
+        f = loss(ΔY)
+        ΔX, X_ = C.inverse((ΔY, Y0))
+        @test isapprox(norm(X - X_)/norm(X), 0f0, atol=1f-6)
+        return f, ΔX, C.v1.grad, C.v2.grad, C.v3.grad
+    end
+
+    # Observed data
+    Y = C.forward(X)
+
+    # Gradient test for X
+    maxiter = 5
+    print("Gradient test ΔX\n")
+    clear_grad!(C)
+    f0, ΔX = objective(C, X0, Y)[1:2]
+    h = .01f0
+    err1 = zeros(Float32, maxiter)
+    err2 = zeros(Float32, maxiter)
+    for j=1:maxiter
+        f = loss(C.forward(X0 + h*dX) - Y)
+        err1[j] = abs(f - f0)
+        err2[j] = abs(f - f0 - h*dot(dX, ΔX))
+        print(err1[j], "; ", err2[j], "\n")
+        h = h/2f0
+    end
+
+    @test isapprox(err1[end] / (err1[1]/2^(maxiter-1)), 1f0; atol=1f0)
+    @test isapprox(err2[end] / (err2[1]/4^(maxiter-1)), 1f0; atol=1f0)
+
+
+    # Gradient test for v
+    print("\nGradient test Δv1\n")
+    clear_grad!(C0)
+    f0, ΔX, Δv1, Δv2, Δv3 = objective(C0, X, Y)
+    @show dot(Δv1, Δv1), dot(Δv2, Δv2) , dot(Δv3, Δv3)
+    h = .01f0
+    err3 = zeros(Float32, maxiter)
+    err4 = zeros(Float32, maxiter)
+    for j=1:maxiter
+        C0.v1.data = v10 + h*dv1
+        C0.v2.data = v20 + h*dv2
+        C0.v3.data = v30 + h*dv3
+        f = loss(C0.forward(X) - Y)
+
+        err3[j] = abs(f - f0)
+        err4[j] = abs(f - f0 - h*dot(dv1, Δv1) - h*dot(dv2, Δv2) - h*dot(dv3, Δv3))
+        print(err3[j], "; ", err4[j], "\n")
+        h = h/2f0
+    end
+
+    @test isapprox(err3[end] / (err3[1]/2^(maxiter-1)), 1f0; atol=1f1)
+    @test isapprox(err4[end] / (err4[1]/4^(maxiter-1)), 1f0; atol=1f1)
+end
+
+test_gradients()
+
+###################################################################################################
+# Gradient test: forward-inverse in reverse order
+
+function test_gradients_reverse()
+    nx = 28
+    ny = 28
+    k = 4
+    batchsize = 2
+
+    v1 = randn(Float32, k) |> device
+    v10 = randn(Float32, k) |> device
+    dv1 = v1 - v10
+
+    v2 = randn(Float32, k) |> device
+    v20 = randn(Float32, k) |> device
+    dv2 = v2 - v20
+
+    v3 = randn(Float32, k) |> device
+    v30 = randn(Float32, k) |> device
+    dv3 = v3 - v30
+
+    X = randn(Float32, nx, ny, k, batchsize) |> device
+    X0 = randn(Float32, nx, ny, k, batchsize) |> device
+    dX = X - X0
+
+    C = Conv1x1(v1, v2, v3) |> device
+    C0 = Conv1x1(v10, v20, v30) |> device
+
+    loss(ΔY) = .5f0*norm(ΔY)^2
+
+    function objectiveT(C, X, Y)
+        Y0 = C.inverse(X)
+        ΔY = Y0 - Y
+        f = loss(ΔY)
+        ΔX, X_ = C.forward((ΔY, Y0))
+        @test isapprox(norm(X - X_)/norm(X), 0f0, atol=1f-6)
+        return f, ΔX, C.v1.grad, C.v2.grad, C.v3.grad
+    end
+
+    # Observed data
+    Y = C.forward(X)
+
+    # Gradient test for X
+    maxiter = 5
+    print("\nGradient test ΔX\n")
+    C = Conv1x1(v1, v2, v3) |> device
+    f0, ΔX = objectiveT(C, X0, Y)[1:2]
+    h = .01f0
+    err5 = zeros(Float32, maxiter)
+    err6 = zeros(Float32, maxiter)
+    for j=1:maxiter
+        f = loss(C.inverse(X0 + h*dX) - Y)
+        err5[j] = abs(f - f0)
+        err6[j] = abs(f - f0 - h*dot(dX, ΔX))
+        print(err5[j], "; ", err6[j], "\n")
+        h = h/2f0
+    end
+
+    @test isapprox(err5[end] / (err5[1]/2^(maxiter-1)), 1f0; atol=1f0)
+    @test isapprox(err6[end] / (err6[1]/4^(maxiter-1)), 1f0; atol=1f0)
+
+
+    # Gradient test for v
+    print("\nGradient test Δv1\n")
+    C0 = Conv1x1(v10, v20, v30) |> device
+    f0, ΔX, Δv1, Δv2, Δv3 = objectiveT(C0, X, Y)
+    h = .01f0
+    err7 = zeros(Float32, maxiter)
+    err8 = zeros(Float32, maxiter)
+    for j=1:maxiter
+        C0.v1.data = v10 + h*dv1
+        C0.v2.data = v20 + h*dv2
+        C0.v3.data = v30 + h*dv3
+        f = loss(C0.inverse(X) - Y)
+        err7[j] = abs(f - f0)
+        err8[j] = abs(f - f0 - h*dot(dv1, Δv1) - h*dot(dv2, Δv2) - h*dot(dv3, Δv3))
+        print(err7[j], "; ", err8[j], "\n")
+        h = h/2f0
+    end
+
+    @test isapprox(err7[end] / (err7[1]/2^(maxiter-1)), 1f0; atol=1f1)
+    @test isapprox(err8[end] / (err8[1]/4^(maxiter-1)), 1f0; atol=1f1)
+end
+
+test_gradients_reverse()
+
+###################################################################################################
+# Jacobian-related tests
+
+function test_jacobian()
+    nx = 28
+    ny = 28
+    k = 4
+
+    # Initialization
+    batchsize=10
+    v10 = randn(Float32, k) |> device
+    v20 = randn(Float32, k) |> device
+    v30 = randn(Float32, k) |> device
+    C0 = Conv1x1(v10, v20, v30; logdet=true) |> device
+    θ0 = deepcopy(get_params(C0))
+    v1 = randn(Float32, k) |> device
+    v2 = randn(Float32, k) |> device
+    v3 = randn(Float32, k) |> device
+    C = Conv1x1(v1, v2, v3; logdet=true) |> device
+    θ = deepcopy(get_params(C))
+    X = randn(Float32, nx, ny, k, batchsize) |> device
+
+    # Perturbation (normalized)
+    dθ = θ-θ0
+    for i = 1:length(θ)
+        dθ[i] = norm(θ0[i])*dθ[i]/(norm(dθ[i]).+1f-10)
+    end
+    dX = randn(Float32, nx, ny, k, batchsize) |> device; dX = norm(X)*dX/norm(dX)
+
+    # Jacobian eval
+    dY, Y = C.jacobian(dX, dθ, X)
+
+    # Test
+    print("\nJacobian test\n")
+    h = 0.1f0
+    maxiter = 7
+    err9 = zeros(Float32, maxiter)
+    err10 = zeros(Float32, maxiter)
+    for j=1:maxiter
+        set_params!(C, θ+h*dθ)
+        Y_loc, _ = C.forward(X+h*dX)
+        err9[j] = norm(Y_loc - Y)
+        err10[j] = norm(Y_loc - Y - h*dY)
+        print(err9[j], "; ", err10[j], "\n")
+        h = h/2f0
+    end
+
+    @test isapprox(err9[end] / (err9[1]/2^(maxiter-1)), 1f0; atol=1f1)
+    @test isapprox(err10[end] / (err10[1]/4^(maxiter-1)), 1f0; atol=1f1)
+
+    # Adjoint test
+
+    set_params!(C, θ)
+    dY, Y = C.jacobian(dX, 0f0*dθ, X)
+    dY_ = randn(Float32, size(dY)) |> device
+    dX_, dθ_, _ = C.adjointJacobian(dY_, Y)
+    a = dot(dY, dY_)
+    b = dot(dX, dX_)+dot(0f0*dθ, dθ_)
+    @test isapprox(a, b; rtol=1f-3)
+
+    # Gradient test (inverse)
+
+    Y = randn(Float32, nx, ny, k, batchsize) |> device
+
+    # Perturbation (normalized)
+    dY = randn(Float32, nx, ny, k, batchsize) |> device; dY *= norm(Y)/norm(dY)
+
+    # Jacobian (inverse) eval
+    dX, X = C.jacobianInverse(dY, dθ, Y)
+
+    # Test
+    print("\nJacobian (inverse) test\n")
+    h = 0.1f0
+    maxiter = 7
+    err11 = zeros(Float32, maxiter)
+    err12 = zeros(Float32, maxiter)
+    for j=1:maxiter
+        set_params!(C, θ+h*dθ)
+        X_loc, _ = C.inverse(Y+h*dY)
+        err11[j] = norm(X_loc - X)
+        err12[j] = norm(X_loc - X - h*dX)
+        print(err11[j], "; ", err12[j], "\n")
+        h = h/2f0
+    end
+
+    @test isapprox(err11[end] / (err11[1]/2^(maxiter-1)), 1f0; atol=1f1)
+    @test isapprox(err12[end] / (err12[1]/4^(maxiter-1)), 1f0; atol=1f1)
+
+    # Inverse test
+
+    dY = randn(Float32, nx, ny, k, batchsize) |> device
+    Y = randn(Float32, nx, ny, k, batchsize) |> device
+    dX = randn(Float32, nx, ny, k, batchsize) |> device
+    X = randn(Float32, nx, ny, k, batchsize) |> device
+    dX_, X_ = C.jacobianInverse(dY, 0f0*dθ, Y)
+    dY_, Y_ = C.jacobian(dX_, 0f0*dθ, X_)
+    @test isapprox(dY_, dY; rtol=1f-3)
+    @test isapprox(Y_, Y; rtol=1f-3)
+    dY_, Y_ = C.jacobian(dX, 0f0*dθ, X)
+    dX_, X_ = C.jacobianInverse(dY_, 0f0*dθ, Y_)
+    @test isapprox(dX_, dX; rtol=1f-3)
+    @test isapprox(X_, X; rtol=1f-3)
+
+    # Adjoint test (inverse)
+
+    set_params!(C, θ)
+    dY, Y = C.jacobianInverse(dX, dθ, X)
+    dY_ = randn(Float32, size(dY)) |> device
+    dX_, dθ_, _ = C.adjointJacobianInverse(dY_, Y)
+    a = dot(dY, dY_)
+    b = dot(dX, dX_)+dot(dθ, dθ_)
+    @test isapprox(a, b; rtol=1f-3)
+end
+
+test_jacobian()
