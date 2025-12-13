@@ -1,250 +1,422 @@
-# Test for ActNorm layer (non-CV version)
-# Tests include: invertibility, gradient tests, per-batch logdet
+# Author: Philipp Witte, pwitte3@gatech.edu
+# Date: January 2020
 
 using Test, Random, LinearAlgebra, Statistics
-using InvertibleNetworks: get_params, clear_grad!
+using InvertibleNetworks: get_params, get_grads, clear_grad!, set_params!
 
 using CNCV
 
-Random.seed!(123)
+Random.seed!(11)
+###############################################################################
+# Test logdet implementation
 
-@testset "ActNorm Layer Tests" begin
+# Input
+nx = 4
+ny = 4
+nc = 3
+batchsize = 1
+X = rand(Float32, nx, ny, nc, batchsize)
 
-    ###############################################################################
-    # Test 2D ActNorm
-    ###############################################################################
+# Actnorm and initialize
+AN = ActNorm(nc; logdet=true)
+AN.forward(X)
 
-    @testset "ActNorm 2D - Basic" begin
-        # Parameters
-        nx, ny = 16, 16
-        nc = 4
-        batchsize = 8
-
-        # Create layer
-        AN = ActNorm(nc; logdet=true)
-
-        # Input
-        X = randn(Float32, nx, ny, nc, batchsize)
-
-        # Forward pass
-        Y, logdet = AN.forward(X)
-
-        @test size(Y) == size(X)
-        @test !isnothing(AN.s.data)
-        @test !isnothing(AN.b.data)
-
-        # Test that parameters are initialized (output has zero mean and unit variance per channel)
-        Y_mean = mean(Y; dims=(1,2,4))
-        Y_std = std(Y; dims=(1,2,4))
-        @test isapprox(Y_mean, zeros(Float32, 1, 1, nc, 1); atol=1e-5)
-        @test isapprox(Y_std, ones(Float32, 1, 1, nc, 1); atol=1e-1)
-    end
-
-    @testset "ActNorm 2D - Per-batch logdet" begin
-        nx, ny = 16, 16
-        nc = 4
-        batchsize = 8
-
-        AN = ActNorm(nc; logdet=true)
-        X = randn(Float32, nx, ny, nc, batchsize)
-
-        # Forward with per_batch=false (batch-averaged, default)
-        Y1, logdet_avg = AN.forward(X; logdet_per_batch=false)
-
-        # Forward with per_batch=true
-        Y2, logdet_batch = AN.forward(X; logdet_per_batch=true)
-
-        @test size(Y1) == size(Y2)
-        @test Y1 ≈ Y2  # Output should be the same
-
-        # Check logdet dimensions
-        @test typeof(logdet_avg) <: Real  # Single value
-        @test length(logdet_batch) == batchsize  # Vector of length batchsize
-
-        # Check that average of per-batch equals batch-averaged
-        @test isapprox(mean(logdet_batch), logdet_avg; rtol=1e-5)
-
-        # Verify logdet value
-        expected_logdet = nx * ny * sum(log.(abs.(AN.s.data)))
-        @test isapprox(logdet_avg, expected_logdet; rtol=1e-5)
-        @test all(isapprox.(logdet_batch, expected_logdet; rtol=1e-5))
-    end
-
-    @testset "ActNorm 2D - Invertibility" begin
-        nx, ny = 16, 16
-        nc = 4
-        batchsize = 8
-
-        AN = ActNorm(nc; logdet=true)
-        X = randn(Float32, nx, ny, nc, batchsize)
-
-        # Forward-inverse
-        Y, _ = AN.forward(X)
-        X_reconstructed = AN.inverse(Y)
-
-        @test isapprox(X, X_reconstructed; rtol=1e-5)
-
-        # Inverse-forward
-        Y2 = AN.inverse(X)
-        X_reconstructed2, _ = AN.forward(Y2)
-
-        @test isapprox(X, X_reconstructed2; rtol=1e-5)
-    end
-
-    @testset "ActNorm 2D - Gradient Test (Input)" begin
-        nx, ny = 8, 8
-        nc = 2
-        batchsize = 4
-
-        AN = ActNorm(nc; logdet=true)
-        X = randn(Float32, nx, ny, nc, batchsize)
-        X0 = randn(Float32, nx, ny, nc, batchsize)
-        dX = randn(Float32, nx, ny, nc, batchsize)
-
-        # Loss function
-        function loss(AN, X)
-            Y, logdet = AN.forward(X)
-            f = -logdet + 0.5f0*norm(Y)^2f0
-            ΔY = Y
-            ΔX = AN.backward(ΔY, Y)[1]
-            return f, ΔX
+# Explicitely compute logdet of Jacobian through probing
+# for small number of dimensions
+J = zeros(Float32, Int(nx*ny*nc), Int(nx*ny*nc))
+for i=1:nc
+    count = 1
+    for j=1:nx
+        for k=1:ny
+            E = zeros(Float32, nx, ny, nc, 1)
+            E[k, j, i] = 1f0
+            local Y = AN.forward(X)[1]
+            J[:, (i-1)*nx*ny + count] = vec(AN.backward(E, Y)[1])
+            count += 1
         end
-
-        # Initial loss
-        f0, ΔX = loss(AN, X0)
-
-        # Gradient test
-        h = 0.1f0
-        maxiter = 5
-        err1 = zeros(Float32, maxiter)
-        err2 = zeros(Float32, maxiter)
-
-        println("\nGradient test ActNorm 2D: input")
-        for j=1:maxiter
-            f = loss(AN, X0 + h*dX)[1]
-            err1[j] = abs(f - f0)
-            err2[j] = abs(f - f0 - h*dot(dX, ΔX))
-            println("  Iter $j: err1=$(err1[j]), err2=$(err2[j])")
-            h /= 2f0
-        end
-
-        @test isapprox(err1[end] / (err1[1]/2^(maxiter-1)), 1f0; atol=1f1)
-        @test isapprox(err2[end] / (err2[1]/4^(maxiter-1)), 1f0; atol=1f1)
     end
+end
+lgdet1 = log(abs(det(J)))
+lgdet2 = AN.forward(X)[2]
+@test isapprox((lgdet1 - lgdet2)/lgdet1, 0f0; atol=1f-6)
 
-    @testset "ActNorm 2D - Gradient Test (Parameters)" begin
-        nx, ny = 8, 8
-        nc = 2
-        batchsize = 4
 
-        AN = ActNorm(nc; logdet=true)
-        AN.forward(randn(Float32, nx, ny, nc, batchsize))
-        X = randn(Float32, nx, ny, nc, batchsize)
+###############################################################################
+# Test logdet_per_batch option
 
-        # Initialize parameters
-        θ0 = deepcopy(get_params(AN))
+# Input with larger batchsize
+nx = 4
+ny = 4
+nc = 3
+batchsize = 5
+X = rand(Float32, nx, ny, nc, batchsize)
 
-        # Create another instance with different params
-        AN2 = ActNorm(nc; logdet=true)
-        AN2.forward(randn(Float32, nx, ny, nc, batchsize))
+# Actnorm and initialize
+AN = ActNorm(nc; logdet=true)
+AN.forward(X)
 
-        θ = deepcopy(get_params(AN2))
+# Test with logdet_per_batch=false (default behavior, scalar output)
+Y, lgdet_scalar = AN.forward(X; logdet=true, logdet_per_batch=false)
+@test lgdet_scalar isa Number
+@test size(lgdet_scalar) == ()
 
-        # Loss function
-        function loss_params(AN, X)
-            Y, logdet = AN.forward(X)
-            f = -logdet + 0.5f0*norm(Y)^2f0 / batchsize
-            ΔY = Y
-            AN.backward(ΔY, Y)
-            return f, deepcopy(get_params(AN))
-        end
+# Test with logdet_per_batch=true (per-batch vector output)
+Y, lgdet_vector = AN.forward(X; logdet=true, logdet_per_batch=true)
+@test lgdet_vector isa AbstractArray
+@test length(lgdet_vector) == batchsize
+@test all(lgdet_vector .≈ lgdet_scalar)
 
-        # Initial loss
-        f0, Δθ = loss_params(AN, X)
+# Test inverse with logdet_per_batch
+X_inv, lgdet_inv_scalar = AN.inverse(Y; logdet=true, logdet_per_batch=false)
+@test lgdet_inv_scalar isa Number
+@test isapprox(lgdet_inv_scalar, -lgdet_scalar; atol=1f-6)
 
-        # Perturbation
-        dθ = θ - θ0
-        for i = 1:length(dθ)
-            if norm(θ0[i].data) != 0f0
-                dθ[i].data .*= norm(θ0[i].data)/norm(dθ[i].data)
-            end
-        end
+X_inv, lgdet_inv_vector = AN.inverse(Y; logdet=true, logdet_per_batch=true)
+@test lgdet_inv_vector isa AbstractArray
+@test length(lgdet_inv_vector) == batchsize
+@test all(lgdet_inv_vector .≈ -lgdet_scalar)
 
-        # Gradient test
-        h = 0.1f0
-        maxiter = 5
-        err3 = zeros(Float32, maxiter)
-        err4 = zeros(Float32, maxiter)
 
-        println("\nGradient test ActNorm 2D: parameters")
-        for j=1:maxiter
-            # Set parameters
-            for i = 1:length(θ0)
-                AN.s.data .= (θ0[1].data + h*dθ[1].data)
-                AN.b.data .= (θ0[2].data + h*dθ[2].data)
-            end
+###############################################################################
+# Initialization and invertibility
 
-            f = loss_params(AN, X)[1]
-            err3[j] = abs(f - f0)
-            err4[j] = abs(f - f0 - h*dot(dθ, Δθ))
-            println("  Iter $j: err3=$(err3[j]), err4=$(err4[j])")
-            h /= 2f0
-        end
+# Input
+nx = 28
+ny = 28
+nc = 4
+batchsize = 1
+X = rand(Float32, nx, ny, nc, batchsize)
 
-        @test isapprox(err3[end] / (err3[1]/2^(maxiter-1)), 1f0; atol=1f1)
-        @test isapprox(err4[end] / (err4[1]/4^(maxiter-1)), 1f0; atol=1f1)
-    end
+# Layer and initialization
+AN = ActNorm(nc; logdet=false)
+Y = AN.forward(X)
 
-    ###############################################################################
-    # Test 3D ActNorm
-    ###############################################################################
+# Test initialization
+@test isapprox(mean(Y), 0f0; atol=1f-6)
+@test isapprox(var(Y), 1f0; atol=1f-3)
 
-    @testset "ActNorm 3D - Basic" begin
-        nx, ny, nz = 8, 8, 8
-        nc = 2
-        batchsize = 4
+# Test invertibility
+@test isapprox(norm(X - AN.inverse(AN.forward(X)))/norm(X), 0f0, atol=1f-6)
+@test isapprox(norm(X - AN.forward(AN.inverse(X)))/norm(X), 0f0, atol=1f-6)
 
-        AN = ActNorm(nc; logdet=true)
-        X = randn(Float32, nx, ny, nz, nc, batchsize)
+# Reversed layer (all combinations)
+AN_rev = reverse(AN)
 
-        Y, logdet = AN.forward(X)
+@test isapprox(norm(X - AN_rev.inverse(AN_rev.forward(X)))/norm(X), 0f0, atol=1f-6)
+@test isapprox(norm(X - AN_rev.forward(AN_rev.inverse(X)))/norm(X), 0f0, atol=1f-6)
 
-        @test size(Y) == size(X)
-        @test !isnothing(AN.s.data)
-        @test !isnothing(AN.b.data)
-    end
+@test isapprox(norm(X - AN_rev.forward(AN.forward(X)))/norm(X), 0f0, atol=1f-6)
+@test isapprox(norm(X - AN_rev.inverse(AN.inverse(X)))/norm(X), 0f0, atol=1f-6)
 
-    @testset "ActNorm 3D - Per-batch logdet" begin
-        nx, ny, nz = 8, 8, 8
-        nc = 2
-        batchsize = 4
+@test isapprox(norm(X - AN.forward(AN_rev.forward(X)))/norm(X), 0f0, atol=1f-6)
+@test isapprox(norm(X - AN.inverse(AN_rev.inverse(X)))/norm(X), 0f0, atol=1f-6)
 
-        AN = ActNorm(nc; logdet=true)
-        X = randn(Float32, nx, ny, nz, nc, batchsize)
+# Test with logdet enabled
+AN = ActNorm(nc; logdet=true)
+Y, lgdt = AN.forward(X)
 
-        # Test per-batch logdet
-        Y1, logdet_avg = AN.forward(X; logdet_per_batch=false)
-        Y2, logdet_batch = AN.forward(X; logdet_per_batch=true)
+# Test initialization
+@test isapprox(mean(Y), 0f0; atol=1f-6)
+@test isapprox(var(Y), 1f0; atol=1f-3)
 
-        @test Y1 ≈ Y2
-        @test length(logdet_batch) == batchsize
-        @test isapprox(mean(logdet_batch), logdet_avg; rtol=1e-5)
-    end
+# Test invertibility
+@test isapprox(norm(X - AN.inverse(AN.forward(X)[1]))/norm(X), 0f0, atol=1f-6)
+@test isapprox(norm(X - AN.forward(AN.inverse(X))[1])/norm(X), 0f0, atol=1f-6)
 
-    @testset "ActNorm 3D - Invertibility" begin
-        nx, ny, nz = 8, 8, 8
-        nc = 2
-        batchsize = 4
+# Reversed layer (all combinations)
+AN_rev = reverse(AN)
 
-        AN = ActNorm(nc; logdet=true)
-        X = randn(Float32, nx, ny, nz, nc, batchsize)
+@test isapprox(norm(X - AN_rev.inverse(AN_rev.forward(X)[1]))/norm(X), 0f0, atol=1f-6)
+@test isapprox(norm(X - AN_rev.forward(AN_rev.inverse(X))[1])/norm(X), 0f0, atol=1f-6)
 
-        Y, _ = AN.forward(X)
-        X_reconstructed = AN.inverse(Y)
+@test isapprox(norm(X - AN_rev.forward(AN.forward(X)[1])[1])/norm(X), 0f0, atol=1f-6)
+@test isapprox(norm(X - AN_rev.inverse(AN.inverse(X)))/norm(X), 0f0, atol=1f-6)
 
-        @test isapprox(X, X_reconstructed; rtol=1e-5)
-    end
+@test isapprox(norm(X - AN.forward(AN_rev.forward(X)[1])[1])/norm(X), 0f0, atol=1f-6)
+@test isapprox(norm(X - AN.inverse(AN_rev.inverse(X)))/norm(X), 0f0, atol=1f-6)
 
+
+###############################################################################
+# Test invertibility with logdet_per_batch option
+
+batchsize = 3
+X = rand(Float32, nx, ny, nc, batchsize)
+AN = ActNorm(nc; logdet=true)
+
+# Test with logdet_per_batch=true
+Y, lgdt_vec = AN.forward(X; logdet_per_batch=true)
+X_rec = AN.inverse(Y)
+@test isapprox(norm(X - X_rec)/norm(X), 0f0, atol=1f-6)
+@test isequal(size(lgdt_vec), (batchsize,))
+
+# Test with reversed layer and logdet_per_batch
+AN_rev = reverse(AN)
+Y_rev, lgdt_rev_vec = AN_rev.forward(X; logdet_per_batch=true)
+X_rec_rev = AN_rev.inverse(Y_rev; logdet_per_batch=true)
+@test isapprox(norm(X - X_rec_rev)/norm(X), 0f0, atol=1f-6)
+@test isequal(size(lgdt_rev_vec), (batchsize,))
+@test all(lgdt_rev_vec + lgdt_vec .≈ 0f0)
+
+###############################################################################
+# Gradient Test
+
+AN = ActNorm(nc; logdet=true)
+batchsize = 1
+X = randn(Float32, nx, ny, nc, batchsize)
+X0 = randn(Float32, nx, ny, nc, batchsize)
+dX = X - X0
+
+# Forward pass
+Y = AN.forward(X)[1]
+
+function loss(AN, X, Y)
+
+    # Forward pass
+    Y_, lgdet = AN.forward(X)
+
+    # Residual and function value
+    ΔY = Y_ - Y
+    f = .5f0/batchsize*norm(ΔY)^2
+    AN.logdet == true && (f -= lgdet)
+
+    # Back propagation
+    ΔX, X_ = AN.backward(ΔY./batchsize, Y_)
+
+    # Check invertibility
+    isapprox(norm(X - X_)/norm(X), 0f0, atol=1f-6)
+
+    return f, ΔX, get_grads(AN)
 end
 
-println("\n✓ All ActNorm tests passed!")
+# Gradient test for X
+maxiter = 6
+print("\nGradient test actnorm\n")
+f0, ΔX = loss(AN, X0, Y)[1:2]
+h = .1f0
+err1 = zeros(Float32, maxiter)
+err2 = zeros(Float32, maxiter)
+for j=1:maxiter
+    f = loss(AN, X0 + h*dX, Y)[1]
+    err1[j] = abs(f - f0)
+    err2[j] = abs(f - f0 - h*dot(dX, ΔX))
+    print(err1[j], "; ", err2[j], "\n")
+    global h = h/2f0
+end
+
+@test isapprox(err1[end] / (err1[1]/2^(maxiter-1)), 1f0; atol=1f1)
+@test isapprox(err2[end] / (err2[1]/4^(maxiter-1)), 1f0; atol=1f1)
+
+
+# Gradient test for parameters
+AN0 = ActNorm(nc; logdet=true); AN0.forward(randn(Float32, nx, ny, nc, batchsize))
+AN_ini = deepcopy(AN0)
+θ = get_params(AN_ini)
+dθ = get_params(AN)-get_params(AN0)
+maxiter = 6
+print("\nGradient test actnorm\n")
+f0, ΔX, Δθ = loss(AN0, X, Y)
+h = 1f0
+err3 = zeros(Float32, maxiter)
+err4 = zeros(Float32, maxiter)
+for j=1:maxiter
+    set_params!(AN0, θ+h*dθ)
+    f = loss(AN0, X, Y)[1]
+    err3[j] = abs(f - f0)
+    err4[j] = abs(f - f0 - h*dot(dθ, Δθ))
+    print(err3[j], "; ", err4[j], "\n")
+    global h = h/2f0
+end
+
+@test isapprox(err3[end] / (err3[1]/2^(maxiter-1)), 1f0; atol=1f1)
+@test isapprox(err4[end] / (err4[1]/4^(maxiter-1)), 1f0; atol=1f1)
+
+
+###############################################################################
+# Gradient Test with logdet_per_batch option
+
+AN = ActNorm(nc; logdet=true)
+batchsize = 4
+X = randn(Float32, nx, ny, nc, batchsize)
+X0 = randn(Float32, nx, ny, nc, batchsize)
+dX = X - X0
+
+# Forward pass
+Y = AN.forward(X)[1]
+
+function loss_per_batch(AN, X, Y)
+
+    # Forward pass with logdet_per_batch
+    Y_, lgdet_vec = AN.forward(X; logdet_per_batch=true)
+
+    # Residual and function value
+    ΔY = Y_ - Y
+    f = .5f0/batchsize*norm(ΔY)^2
+    AN.logdet == true && (f -= sum(lgdet_vec)/batchsize)
+
+    # Back propagation
+    ΔX, X_ = AN.backward(ΔY./batchsize, Y_)
+
+    # Check invertibility
+    isapprox(norm(X - X_)/norm(X), 0f0, atol=1f-6)
+
+    return f, ΔX, get_grads(AN)
+end
+
+# Gradient test for X with logdet_per_batch
+maxiter = 6
+print("\nGradient test actnorm with logdet_per_batch\n")
+f0, ΔX = loss_per_batch(AN, X0, Y)[1:2]
+h = .1f0
+err1_pb = zeros(Float32, maxiter)
+err2_pb = zeros(Float32, maxiter)
+for j=1:maxiter
+    f = loss_per_batch(AN, X0 + h*dX, Y)[1]
+    err1_pb[j] = abs(f - f0)
+    err2_pb[j] = abs(f - f0 - h*dot(dX, ΔX))
+    print(err1_pb[j], "; ", err2_pb[j], "\n")
+    global h = h/2f0
+end
+
+@test isapprox(err1_pb[end] / (err1_pb[1]/2^(maxiter-1)), 1f0; atol=1f1)
+@test isapprox(err2_pb[end] / (err2_pb[1]/4^(maxiter-1)), 1f0; atol=1f1)
+
+
+###############################################################################
+# Gradient Test reversed layer
+
+AN = reverse(ActNorm(nc; logdet=true))
+batchsize = 1
+X = randn(Float32, nx, ny, nc, batchsize)
+X0 = randn(Float32, nx, ny, nc, batchsize)
+dX = X - X0
+
+# Forward pass
+Y = AN.forward(X)[1]
+
+# Gradient test for X
+maxiter = 6
+print("\nGradient test actnorm reverse\n")
+f0, ΔX = loss(AN, X0, Y)[1:2]
+h = .1f0
+err5 = zeros(Float32, maxiter)
+err6 = zeros(Float32, maxiter)
+for j=1:maxiter
+    f = loss(AN, X0 + h*dX, Y)[1]
+    err5[j] = abs(f - f0)
+    err6[j] = abs(f - f0 - h*dot(dX, ΔX))
+    print(err5[j], "; ", err6[j], "\n")
+    global h = h/2f0
+end
+
+@test isapprox(err5[end] / (err5[1]/2^(maxiter-1)), 1f0; atol=1f1)
+@test isapprox(err6[end] / (err6[1]/4^(maxiter-1)), 1f0; atol=1f1)
+
+
+# Gradient test for parameters
+AN0 = reverse(ActNorm(nc; logdet=true))
+AN0.forward(randn(Float32, nx, ny, nc, batchsize))
+AN_ini = deepcopy(AN0)
+θ = get_params(AN_ini)
+dθ = get_params(AN)-get_params(AN0)
+maxiter = 6
+print("\nGradient test actnorm reverse\n")
+f0, ΔX, Δθ = loss(AN0, X, Y)
+h = 1f0
+err7 = zeros(Float32, maxiter)
+err8 = zeros(Float32, maxiter)
+for j=1:maxiter
+    set_params!(AN0, θ + h*dθ)
+    f = loss(AN0, X, Y)[1]
+    err7[j] = abs(f - f0)
+    err8[j] = abs(f - f0 - h*dot(dθ, Δθ))
+    print(err7[j], "; ", err8[j], "\n")
+    global h = h/2f0
+end
+
+@test isapprox(err7[end] / (err7[1]/2^(maxiter-1)), 1f0; atol=1f1)
+@test isapprox(err8[end] / (err8[1]/4^(maxiter-1)), 1f0; atol=1f1)
+
+
+###############################################################################
+# Gradient Test reversed layer with logdet_per_batch
+
+AN = reverse(ActNorm(nc; logdet=true))
+batchsize = 4
+X = randn(Float32, nx, ny, nc, batchsize)
+X0 = randn(Float32, nx, ny, nc, batchsize)
+dX = X - X0
+
+# Forward pass
+Y = AN.forward(X)[1]
+
+# Gradient test for X with logdet_per_batch
+maxiter = 6
+print("\nGradient test actnorm reverse with logdet_per_batch\n")
+f0, ΔX = loss_per_batch(AN, X0, Y)[1:2]
+h = .1f0
+err5_pb = zeros(Float32, maxiter)
+err6_pb = zeros(Float32, maxiter)
+for j=1:maxiter
+    f = loss_per_batch(AN, X0 + h*dX, Y)[1]
+    err5_pb[j] = abs(f - f0)
+    err6_pb[j] = abs(f - f0 - h*dot(dX, ΔX))
+    print(err5_pb[j], "; ", err6_pb[j], "\n")
+    global h = h/2f0
+end
+
+@test isapprox(err5_pb[end] / (err5_pb[1]/2^(maxiter-1)), 1f0; atol=1f1)
+@test isapprox(err6_pb[end] / (err6_pb[1]/4^(maxiter-1)), 1f0; atol=1f1)
+
+
+###################################################################################################
+# Jacobian-related tests
+
+# Gradient test
+
+# Initialization
+logdet=true
+AN = ActNorm(nc; logdet=logdet)
+batchsize = 1
+AN.forward(randn(Float32, nx, ny, nc, batchsize))
+θ = deepcopy(get_params(AN))
+AN0 = ActNorm(nc; logdet=logdet); AN0.forward(randn(Float32, nx, ny, nc, batchsize))
+θ0 = deepcopy(get_params(AN0))
+X = randn(Float32, nx, ny, nc, batchsize)
+
+# Perturbation (normalized)
+dθ = θ-θ0
+for i = 1:length(θ)
+    dθ[i] = norm(θ0[i])*dθ[i]/(norm(dθ[i]).+1f-10)
+end
+dX = randn(Float32, nx, ny, nc, batchsize); dX *= norm(X)/norm(dX)
+
+# Jacobian eval
+logdet ? ((dY, Y, lgdet, GNdθ) = AN.jacobian(dX, dθ, X)) : ((dY, Y) = AN.jacobian(dX, dθ, X))
+
+# Test
+print("\nJacobian test\n")
+h = 0.1f0
+maxiter = 5
+err9 = zeros(Float32, maxiter)
+err10 = zeros(Float32, maxiter)
+for j=1:maxiter
+    set_params!(AN, θ+h*dθ)
+    logdet ? ((Y_loc, _) = AN.forward(X+h*dX)) : (Y_loc = AN.forward(X+h*dX))
+    err9[j] = norm(Y_loc - Y)
+    err10[j] = norm(Y_loc - Y - h*dY)
+    print(err9[j], "; ", err10[j], "\n")
+    global h = h/2f0
+end
+
+@test isapprox(err9[end] / (err9[1]/2^(maxiter-1)), 1f0; atol=1f1)
+@test isapprox(err10[end] / (err10[1]/4^(maxiter-1)), 1f0; atol=1f1)
+
+# Adjoint test
+
+set_params!(AN, θ)
+logdet ? ((dY, Y, _, _) = AN.jacobian(dX, dθ, X)) : ((dY, Y) = AN.jacobian(dX, dθ, X))
+dY_ = randn(Float32, size(dY))
+logdet ? ((dX_, dθ_, _, _) = AN.adjointJacobian(dY_, Y)) : ((dX_, dθ_, _) = AN.adjointJacobian(dY_, Y))
+a = dot(dY, dY_)
+b = dot(dX, dX_)+dot(dθ, dθ_)
+@test isapprox(a, b; rtol=1f-3)

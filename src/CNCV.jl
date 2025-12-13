@@ -37,7 +37,8 @@ using InvertibleNetworks:
     cat_states,
     split_states,
     clear_grad!,
-    get_params
+    get_params,
+    reverse
 using CUDA
 
 import Base.*
@@ -47,7 +48,14 @@ import DrWatson: _wsave
 import Random: rand
 import Base.getindex
 import Distributions: logpdf, gradlogpdf
-import InvertibleNetworks: forward, inverse, backward
+import InvertibleNetworks:
+    forward,
+    inverse,
+    backward,
+    backward_inv,
+    jacobian,
+    adjointJacobian,
+    tag_as_reversed!
 
 # Utils
 include("./models/utils/activation_functions.jl")
