@@ -55,6 +55,8 @@ import InvertibleNetworks:
     backward_inv,
     jacobian,
     adjointJacobian,
+    jacobianInverse,
+    adjointJacobianInverse,
     tag_as_reversed!
 
 # Utils
