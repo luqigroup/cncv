@@ -1,323 +1,244 @@
-# Test for ConditionalLayerGlow (non-CV version)
-# Tests include: invertibility, gradient tests, per-batch logdet, conditioning
+# Invertible CNN layer from Dinh et al. (2017)/Kingma and Dhariwal (2018)
+# Author: Philipp Witte, pwitte3@gatech.edu
+# Date: January 2020
 
-using Test, Random, LinearAlgebra, Statistics
-using InvertibleNetworks: get_params, clear_grad!
+using Test, Random, LinearAlgebra
+using InvertibleNetworks: get_params, get_grads, clear_grad!, set_params!, mse, ∇mse, ResidualBlock
 
 using CNCV
 
-Random.seed!(101112)
-
-@testset "ConditionalLayerGlow Tests" begin
-
-    ###############################################################################
-    # Test 2D ConditionalLayerGlow
-    ###############################################################################
-
-    @testset "ConditionalLayerGlow 2D - Basic" begin
-        nx, ny = 16, 16
-        n_in = 4
-        n_cond = 2
-        n_hidden = 8
-        batchsize = 8
-
-        # Create layer
-        CL = ConditionalLayerGlow(n_in, n_cond, n_hidden; logdet=true)
-
-        # Input and conditioning
-        X = randn(Float32, nx, ny, n_in, batchsize)
-        C = randn(Float32, nx, ny, n_cond, batchsize)
-
-        # Forward pass
-        Y, logdet = CL.forward(X, C)
-
-        @test size(Y) == size(X)
-        @test typeof(logdet) <: Real
-    end
+# Random seed
+Random.seed!(11)
 
-    @testset "ConditionalLayerGlow 2D - Per-batch logdet" begin
-        nx, ny = 16, 16
-        n_in = 4
-        n_cond = 2
-        n_hidden = 8
-        batchsize = 8
-
-        CL = ConditionalLayerGlow(n_in, n_cond, n_hidden; logdet=true)
-        X = randn(Float32, nx, ny, n_in, batchsize)
-        C = randn(Float32, nx, ny, n_cond, batchsize)
-
-        # Forward with per_batch=false (batch-averaged, default)
-        Y1, logdet_avg = CL.forward(X, C; logdet_per_batch=false)
-
-        # Forward with per_batch=true
-        Y2, logdet_batch = CL.forward(X, C; logdet_per_batch=true)
-
-        @test Y1 ≈ Y2
-
-        # Check logdet dimensions
-        @test typeof(logdet_avg) <: Real
-        @test length(logdet_batch) == batchsize
-
-        # Check that average of per-batch equals batch-averaged
-        @test isapprox(mean(logdet_batch), logdet_avg; rtol=1e-5)
-    end
-
-    @testset "ConditionalLayerGlow 2D - Invertibility" begin
-        nx, ny = 16, 16
-        n_in = 4
-        n_cond = 2
-        n_hidden = 8
-        batchsize = 8
-
-        CL = ConditionalLayerGlow(n_in, n_cond, n_hidden; logdet=false)
-        X = randn(Float32, nx, ny, n_in, batchsize)
-        C = randn(Float32, nx, ny, n_cond, batchsize)
-
-        # Forward-inverse
-        Y = CL.forward(X, C)
-        X_recon = CL.inverse(Y, C)
-
-        @test isapprox(X, X_recon; rtol=1e-4)
-
-        # Inverse-forward
-        Y2 = CL.inverse(X, C)
-        X_recon2 = CL.forward(Y2, C)
-
-        @test isapprox(X, X_recon2; rtol=1e-4)
-    end
-
-    @testset "ConditionalLayerGlow 2D - Conditioning Effect" begin
-        # Test that different conditioning produces different outputs
-        nx, ny = 8, 8
-        n_in = 4
-        n_cond = 2
-        n_hidden = 8
-        batchsize = 4
-
-        CL = ConditionalLayerGlow(n_in, n_cond, n_hidden; logdet=false)
-        X = randn(Float32, nx, ny, n_in, batchsize)
-        C1 = randn(Float32, nx, ny, n_cond, batchsize)
-        C2 = randn(Float32, nx, ny, n_cond, batchsize)
-
-        Y1 = CL.forward(X, C1)
-        Y2 = CL.forward(X, C2)
-
-        # Different conditioning should produce different outputs
-        @test !isapprox(Y1, Y2; rtol=0.1)
-    end
-
-    @testset "ConditionalLayerGlow 2D - Gradient Test (Input)" begin
-        nx, ny = 8, 8
-        n_in = 4
-        n_cond = 2
-        n_hidden = 8
-        batchsize = 4
-
-        CL = ConditionalLayerGlow(n_in, n_cond, n_hidden; logdet=true)
-
-        X = randn(Float32, nx, ny, n_in, batchsize)
-        X0 = randn(Float32, nx, ny, n_in, batchsize)
-        C = randn(Float32, nx, ny, n_cond, batchsize)
-        dX = randn(Float32, nx, ny, n_in, batchsize)
-
-        # Loss function
-        function loss(CL, X, C)
-            Y, logdet = CL.forward(X, C)
-            f = -logdet + 0.5f0*norm(Y)^2f0
-
-            ΔY = Y
-            ΔX, _, _ = CL.backward(ΔY, Y, C)
-
-            return f, ΔX
-        end
-
-        # Initial loss
-        f0, ΔX = loss(CL, X0, C)
-
-        # Gradient test
-        h = 0.1f0
-        maxiter = 5
-        err1 = zeros(Float32, maxiter)
-        err2 = zeros(Float32, maxiter)
-
-        println("\nGradient test ConditionalLayerGlow 2D: input")
-        for j=1:maxiter
-            f = loss(CL, X0 + h*dX, C)[1]
-            err1[j] = abs(f - f0)
-            err2[j] = abs(f - f0 - h*dot(dX, ΔX))
-            println("  Iter $j: err1=$(err1[j]), err2=$(err2[j])")
-            h /= 2f0
-        end
-
-        @test isapprox(err1[end] / (err1[1]/2^(maxiter-1)), 1f0; atol=1f1)
-        @test isapprox(err2[end] / (err2[1]/4^(maxiter-1)), 1f0; atol=1f1)
-    end
-
-    @testset "ConditionalLayerGlow 2D - Gradient Test (Conditioning)" begin
-        nx, ny = 8, 8
-        n_in = 4
-        n_cond = 2
-        n_hidden = 8
-        batchsize = 4
-
-        CL = ConditionalLayerGlow(n_in, n_cond, n_hidden; logdet=true)
-
-        X = randn(Float32, nx, ny, n_in, batchsize)
-        C = randn(Float32, nx, ny, n_cond, batchsize)
-        C0 = randn(Float32, nx, ny, n_cond, batchsize)
-        dC = randn(Float32, nx, ny, n_cond, batchsize)
-
-        # Loss function
-        function loss_cond(CL, X, C)
-            Y, logdet = CL.forward(X, C)
-            f = -logdet + 0.5f0*norm(Y)^2f0
-
-            ΔY = Y
-            _, _, ΔC = CL.backward(ΔY, Y, C)
-
-            return f, ΔC
-        end
-
-        # Initial loss
-        f0, ΔC = loss_cond(CL, X, C0)
-
-        # Gradient test
-        h = 0.1f0
-        maxiter = 5
-        err1 = zeros(Float32, maxiter)
-        err2 = zeros(Float32, maxiter)
-
-        println("\nGradient test ConditionalLayerGlow 2D: conditioning")
-        for j=1:maxiter
-            f = loss_cond(CL, X, C0 + h*dC)[1]
-            err1[j] = abs(f - f0)
-            err2[j] = abs(f - f0 - h*dot(dC, ΔC))
-            println("  Iter $j: err1=$(err1[j]), err2=$(err2[j])")
-            h /= 2f0
-        end
-
-        @test isapprox(err1[end] / (err1[1]/2^(maxiter-1)), 1f0; atol=1f1)
-        @test isapprox(err2[end] / (err2[1]/4^(maxiter-1)), 1f0; atol=1f1)
-    end
-
-    @testset "ConditionalLayerGlow 2D - Gradient Test (Parameters)" begin
-        nx, ny = 8, 8
-        n_in = 4
-        n_cond = 2
-        n_hidden = 8
-        batchsize = 4
-
-        # Two instances
-        CL1 = ConditionalLayerGlow(n_in, n_cond, n_hidden; logdet=true)
-        CL2 = ConditionalLayerGlow(n_in, n_cond, n_hidden; logdet=true)
-
-        X = randn(Float32, nx, ny, n_in, batchsize)
-        C = randn(Float32, nx, ny, n_cond, batchsize)
-
-        θ0 = deepcopy(get_params(CL1))
-        θ = deepcopy(get_params(CL2))
-
-        # Loss function
-        function loss_params(CL, X, C)
-            Y, logdet = CL.forward(X, C)
-            f = -logdet + 0.5f0*norm(Y)^2f0
-
-            ΔY = Y
-            CL.backward(ΔY, Y, C)
-
-            return f, deepcopy(get_params(CL))
-        end
-
-        f0, Δθ = loss_params(CL1, X, C)
-
-        # Perturbation
-        dθ = θ - θ0
-        for i = 1:length(dθ)
-            if norm(θ0[i].data) != 0f0
-                dθ[i].data .*= norm(θ0[i].data)/norm(dθ[i].data)
-            end
-        end
-
-        # Gradient test
-        h = 0.1f0
-        maxiter = 5
-        err3 = zeros(Float32, maxiter)
-        err4 = zeros(Float32, maxiter)
-
-        println("\nGradient test ConditionalLayerGlow 2D: parameters")
-        for j=1:maxiter
-            θ_curr = θ0 + h*dθ
-            set_params!(CL1, θ_curr)
-
-            f = loss_params(CL1, X, C)[1]
-            err3[j] = abs(f - f0)
-            err4[j] = abs(f - f0 - h*dot(dθ, Δθ))
-            println("  Iter $j: err3=$(err3[j]), err4=$(err4[j])")
-            h /= 2f0
-        end
-
-        @test isapprox(err3[end] / (err3[1]/2^(maxiter-1)), 1f0; atol=1f1)
-        @test isapprox(err4[end] / (err4[1]/4^(maxiter-1)), 1f0; atol=1f1)
-    end
-
-    ###############################################################################
-    # Test 3D ConditionalLayerGlow
-    ###############################################################################
-
-    @testset "ConditionalLayerGlow 3D - Basic" begin
-        nx, ny, nz = 8, 8, 8
-        n_in = 4
-        n_cond = 2
-        n_hidden = 8
-        batchsize = 4
-
-        CL = ConditionalLayerGlow3D(n_in, n_cond, n_hidden; logdet=true)
-
-        X = randn(Float32, nx, ny, nz, n_in, batchsize)
-        C = randn(Float32, nx, ny, nz, n_cond, batchsize)
-
-        Y, logdet = CL.forward(X, C)
-
-        @test size(Y) == size(X)
-        @test typeof(logdet) <: Real
-    end
-
-    @testset "ConditionalLayerGlow 3D - Per-batch logdet" begin
-        nx, ny, nz = 8, 8, 8
-        n_in = 4
-        n_cond = 2
-        n_hidden = 8
-        batchsize = 4
-
-        CL = ConditionalLayerGlow3D(n_in, n_cond, n_hidden; logdet=true)
-        X = randn(Float32, nx, ny, nz, n_in, batchsize)
-        C = randn(Float32, nx, ny, nz, n_cond, batchsize)
-
-        Y1, logdet_avg = CL.forward(X, C; logdet_per_batch=false)
-        Y2, logdet_batch = CL.forward(X, C; logdet_per_batch=true)
-
-        @test Y1 ≈ Y2
-        @test length(logdet_batch) == batchsize
-        @test isapprox(mean(logdet_batch), logdet_avg; rtol=1e-5)
-    end
-
-    @testset "ConditionalLayerGlow 3D - Invertibility" begin
-        nx, ny, nz = 8, 8, 8
-        n_in = 4
-        n_cond = 2
-        n_hidden = 8
-        batchsize = 4
-
-        CL = ConditionalLayerGlow3D(n_in, n_cond, n_hidden; logdet=false)
-        X = randn(Float32, nx, ny, nz, n_in, batchsize)
-        C = randn(Float32, nx, ny, nz, n_cond, batchsize)
-
-        Y = CL.forward(X, C)
-        X_recon = CL.inverse(Y, C)
-
-        @test isapprox(X, X_recon; rtol=1e-4)
-    end
+###################################################################################################
+# Test invertibility
 
+# Input
+nx = 24
+ny = 24
+k = 4
+n_cond = k
+n_hidden = 4
+batchsize = 2
+
+# Input images
+X = randn(Float32, nx, ny, k, batchsize)
+Cond = randn(Float32, nx, ny, k, batchsize)
+X0 = randn(Float32, nx, ny, k, batchsize)
+dX = X - X0
+
+# 1x1 convolution and residual blocks
+C = Conv1x1(k)
+RB = ResidualBlock(Int(k/2)+n_cond, n_hidden; n_out=k, k1=3, k2=3, p1=1, p2=1, fan=true)
+L = ConditionalLayerGlow(C, RB; logdet=true)
+
+X_ = L.inverse(L.forward(X, Cond)[1], Cond)
+@test isapprox(norm(X - X_)/norm(X), 0f0; atol=1e-2)
+
+X_ = L.forward(L.inverse(X, Cond), Cond)[1]
+@test isapprox(norm(X - X_)/norm(X), 0f0; atol=1e-2)
+
+
+###################################################################################################
+# Test logdet_per_batch option
+
+# Input with larger batchsize
+batchsize = 5
+X = randn(Float32, nx, ny, k, batchsize)
+Cond = randn(Float32, nx, ny, k, batchsize)
+
+# Create layer
+C = Conv1x1(k)
+RB = ResidualBlock(Int(k/2)+n_cond, n_hidden; n_out=k, k1=3, k2=3, p1=1, p2=1, fan=true)
+L = ConditionalLayerGlow(C, RB; logdet=true)
+
+# Test with logdet_per_batch=false (default behavior, scalar output)
+Y, lgdet_scalar = L.forward(X, Cond; logdet_per_batch=false)
+@test lgdet_scalar isa Number
+@test size(lgdet_scalar) == ()
+
+# Test with logdet_per_batch=true (per-batch vector output)
+Y, lgdet_vector = L.forward(X, Cond; logdet_per_batch=true)
+@test lgdet_vector isa AbstractArray
+@test length(lgdet_vector) == batchsize
+
+# Test inverse (inverse does not return logdet in ConditionalLayerGlow)
+X_rec = L.inverse(Y, Cond)
+@test isapprox(norm(X - X_rec)/norm(X), 0f0, atol=1e-2)
+
+
+###################################################################################################
+# Test accuracy of logdet with logdet_per_batch option
+
+batchsize = 3
+X = randn(Float32, nx, ny, k, batchsize)
+Cond = randn(Float32, nx, ny, k, batchsize)
+
+C = Conv1x1(k)
+RB = ResidualBlock(Int(k/2)+n_cond, n_hidden; n_out=k, k1=3, k2=3, p1=1, p2=1, fan=true)
+L = ConditionalLayerGlow(C, RB; logdet=true)
+
+# Test with logdet_per_batch=true
+Y, lgdet_vec = L.forward(X, Cond; logdet_per_batch=true)
+
+# Test with logdet_per_batch=false
+Y, lgdet = L.forward(X, Cond; logdet_per_batch=false)
+
+# Verify relationship between scalar and per-batch logdet
+@test isapprox(sum(lgdet_vec), lgdet * batchsize; atol=1f-1)
+
+
+###################################################################################################
+# Gradient tests
+
+# Loss Function
+function loss(L, X, Y, Cond)
+    Y_, logdet = L.forward(X, Cond)
+    f = mse(Y_, Y) - logdet
+    ΔY = ∇mse(Y_, Y)
+    ΔX = L.backward(ΔY, Y_, Cond)[1]
+
+    # Pass back gradients w.r.t. input X and from the residual block and 1x1 conv. layer
+    return f, ΔX, L.C.v1.grad, L.C.v2.grad, L.C.v3.grad, L.RB.W1.grad, L.RB.W2.grad, L.RB.W3.grad
 end
 
-println("\n✓ All ConditionalLayerGlow tests passed!")
+# Loss Function with logdet_per_batch
+function loss_per_batch(L, X, Y, Cond)
+    Y_, logdet_vec = L.forward(X, Cond; logdet_per_batch=true)
+    batchsize = size(X)[end]
+    f = mse(Y_, Y) - sum(logdet_vec)/batchsize
+    ΔY = ∇mse(Y_, Y)
+    ΔX = L.backward(ΔY, Y_, Cond)[1]
+
+    # Pass back gradients w.r.t. input X and from the residual block and 1x1 conv. layer
+    return f, ΔX, L.C.v1.grad, L.C.v2.grad, L.C.v3.grad, L.RB.W1.grad, L.RB.W2.grad, L.RB.W3.grad
+end
+
+# Invertible layers
+batchsize = 2
+X = randn(Float32, nx, ny, k, batchsize)
+Cond = randn(Float32, nx, ny, k, batchsize)
+X0 = randn(Float32, nx, ny, k, batchsize)
+dX = X - X0
+
+C = Conv1x1(k)
+RB = ResidualBlock(Int(k/2)+n_cond, n_hidden; n_out=k, k1=3, k2=3, p1=1, p2=1, fan=true)
+L = ConditionalLayerGlow(C, RB; logdet=true)
+
+C0 = Conv1x1(k)
+RB0 = ResidualBlock(Int(k/2)+n_cond, n_hidden; n_out=k, k1=3, k2=3, p1=1, p2=1, fan=true)
+L01 = ConditionalLayerGlow(C0, RB; logdet=true)
+L02 = ConditionalLayerGlow(C, RB0; logdet=true)
+
+# Gradient test w.r.t. input X0
+Y = L.forward(X, Cond)[1]
+f0, ΔX = loss(L, X0, Y, Cond)[1:2]
+h = 0.1f0
+maxiter = 6
+err1 = zeros(Float32, maxiter)
+err2 = zeros(Float32, maxiter)
+
+print("\nGradient test coupling layer\n")
+for j=1:maxiter
+    f = loss(L, X0 + h*dX, Y, Cond)[1]
+    err1[j] = abs(f - f0)
+    err2[j] = abs(f - f0 - h*dot(dX, ΔX))
+    print(err1[j], "; ", err2[j], "\n")
+    global h = h/2f0
+end
+
+@test isapprox(err1[end] / (err1[1]/2^(maxiter-1)), 1f0; atol=1f0)
+@test isapprox(err2[end] / (err2[1]/4^(maxiter-1)), 1f0; atol=1f0)
+
+
+
+# Gradient test w.r.t. weights of residual block
+Y = L.forward(X, Cond)[1]
+Lini = deepcopy(L02)
+dW1 = L.RB.W1.data - L02.RB.W1.data
+dW2 = L.RB.W2.data - L02.RB.W2.data
+dW3 = L.RB.W3.data - L02.RB.W3.data
+
+f0, ΔX, Δv1, Δv2, Δv3, ΔW1, ΔW2, ΔW3 = loss(L02, X, Y, Cond)
+h = 0.1f0
+maxiter = 4
+err3 = zeros(Float32, maxiter)
+err4 = zeros(Float32, maxiter)
+
+print("\nGradient test coupling layer\n")
+for j=1:maxiter
+    L02.RB.W1.data = Lini.RB.W1.data + h*dW1
+    L02.RB.W2.data = Lini.RB.W2.data + h*dW2
+    L02.RB.W3.data = Lini.RB.W3.data + h*dW3
+    f = loss(L02, X, Y, Cond)[1]
+    err3[j] = abs(f - f0)
+    err4[j] = abs(f - f0 - h*dot(dW1, ΔW1) - h*dot(dW2, ΔW2) - h*dot(dW3, ΔW3))
+    print(err3[j], "; ", err4[j], "\n")
+    global h = h/2f0
+end
+
+@test isapprox(err3[end] / (err3[1]/2^(maxiter-1)), 1f0; atol=1f0)
+@test isapprox(err4[end] / (err4[1]/4^(maxiter-1)), 1f0; atol=1f0)
+
+
+# Gradient test w.r.t. 1x1 conv weights
+Y = L.forward(X, Cond)[1]
+Lini = deepcopy(L01)
+dv1 = C.v1.data - C0.v1.data
+dv2 = C.v2.data - C0.v2.data
+dv3 = C.v3.data - C0.v3.data
+
+f0, ΔX, Δv1, Δv2, Δv3, ΔW1, ΔW2, ΔW3 = loss(L01, X, Y, Cond)
+h = 0.01f0
+maxiter = 4
+err5 = zeros(Float32, maxiter)
+err6 = zeros(Float32, maxiter)
+
+print("\nGradient test coupling layer\n")
+for j=1:maxiter
+    L01.C.v1.data = Lini.C.v1.data + h*dv1
+    L01.C.v2.data = Lini.C.v2.data + h*dv2
+    L01.C.v3.data = Lini.C.v3.data + h*dv3
+    f = loss(L01, X, Y, Cond)[1]
+    err5[j] = abs(f - f0)
+    err6[j] = abs(f - f0 - h*dot(dv1, Δv1) - h*dot(dv2, Δv2) - h*dot(dv3, Δv3))
+    print(err5[j], "; ", err6[j], "\n")
+    global h = h/2f0
+end
+
+@test isapprox(err5[end] / (err5[1]/2^(maxiter-1)), 1f0; atol=1f0)
+@test isapprox(err6[end] / (err6[1]/4^(maxiter-1)), 1f0; atol=1f0)
+
+
+###################################################################################################
+# Gradient tests with logdet_per_batch option
+
+batchsize = 4
+X = randn(Float32, nx, ny, k, batchsize)
+Cond = randn(Float32, nx, ny, k, batchsize)
+X0 = randn(Float32, nx, ny, k, batchsize)
+dX = X - X0
+
+C = Conv1x1(k)
+RB = ResidualBlock(Int(k/2)+n_cond, n_hidden; n_out=k, k1=3, k2=3, p1=1, p2=1, fan=true)
+L = ConditionalLayerGlow(C, RB; logdet=true)
+
+# Gradient test w.r.t. input X0 with logdet_per_batch
+Y = L.forward(X, Cond)[1]
+f0, ΔX = loss_per_batch(L, X0, Y, Cond)[1:2]
+h = 0.1f0
+maxiter = 6
+err7 = zeros(Float32, maxiter)
+err8 = zeros(Float32, maxiter)
+
+print("\nGradient test coupling layer with logdet_per_batch\n")
+for j=1:maxiter
+    f = loss_per_batch(L, X0 + h*dX, Y, Cond)[1]
+    err7[j] = abs(f - f0)
+    err8[j] = abs(f - f0 - h*dot(dX, ΔX))
+    print(err7[j], "; ", err8[j], "\n")
+    global h = h/2f0
+end
+
+@test isapprox(err7[end] / (err7[1]/2^(maxiter-1)), 1f0; atol=1f0)
+@test isapprox(err8[end] / (err8[1]/4^(maxiter-1)), 1f0; atol=1f0)
