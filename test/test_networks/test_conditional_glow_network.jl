@@ -1,301 +1,554 @@
-# Test for NetworkConditionalGlow (non-CV version with per-batch logdet)
-# Full conditional Glow network
-# Tests include: invertibility, gradient tests, per-batch logdet, conditioning
+# Generative model w/ Glow architecture from Kingma & Dhariwal (2018)
+# Author: Philipp Witte, pwitte3@gatech.edu
+# Date: January 2020
 
-using Test, Random, LinearAlgebra, Statistics
-using InvertibleNetworks: get_params, clear_grad!
+using Test, Random, LinearAlgebra, Flux
+using InvertibleNetworks: get_params, clear_grad!, log_likelihood, ∇log_likelihood, LeakyReLUlayer, ResNet, SummarizedNet
+using InvertibleNetworks.CUDA: functional
 
 using CNCV
 
-Random.seed!(404142)
+device = functional() ? gpu : cpu
+(device == gpu) && println("Testing on GPU");
 
-@testset "NetworkConditionalGlow Tests" begin
+# Random seed
+Random.seed!(3);
 
-    ###############################################################################
-    # Test 2D NetworkConditionalGlow
-    ###############################################################################
+# Define network
+nx = 32; ny = 32; nz = 32
+n_in = 3
+n_cond = 3
+n_hidden = 4
+batchsize = 2
+L = 2
+K = 2
+split_scales = false
+N = (nx,ny)
 
-    @testset "NetworkConditionalGlow 2D - Basic" begin
-        nx, ny = 16, 16
-        n_in = 4
-        n_cond = 2
-        n_hidden = 8
-        depth = 2
-        K = 2
-        batchsize = 8
+########################################### Test with split_scales = false N = (nx,ny) #########################
+# Invertibility
 
-        # Create network
-        G = NetworkConditionalGlow(n_in, n_cond, n_hidden, depth, K; logdet=true)
+# Network and input
+G = NetworkConditionalGlow(n_in, n_cond, n_hidden, L, K; split_scales=split_scales,ndims=length(N), rb_activation=LeakyReLUlayer()) |> device
+X = rand(Float32, N..., n_in, batchsize)  |> device
+Cond = rand(Float32, N..., n_cond, batchsize)  |> device
 
-        # Input and conditioning
-        X = randn(Float32, nx, ny, n_in, batchsize)
-        C = randn(Float32, nx, ny, n_cond, batchsize)
+Y, Cond, _ = G.forward(X,Cond)
+X_ = G.inverse(Y,Cond) # saving the cond is important in split scales because of reshapes
 
-        # Forward pass
-        Y, logdet = G.forward(X, C)
+@test isapprox(norm(X - X_)/norm(X), 0f0; atol=1f-5)
 
-        @test size(Y) == size(X)
-        @test typeof(logdet) <: Real
-    end
+###################################################################################################
+# Test logdet_per_batch option
 
-    @testset "NetworkConditionalGlow 2D - Per-batch logdet" begin
-        nx, ny = 16, 16
-        n_in = 4
-        n_cond = 2
-        n_hidden = 8
-        depth = 2
-        K = 2
-        batchsize = 8
 
-        G = NetworkConditionalGlow(n_in, n_cond, n_hidden, depth, K; logdet=true)
-        X = randn(Float32, nx, ny, n_in, batchsize)
-        C = randn(Float32, nx, ny, n_cond, batchsize)
+X_batch = rand(Float32, N..., n_in, batchsize) |> device
+Cond_batch = rand(Float32, N..., n_cond, batchsize) |> device
 
-        # Forward with per_batch=false (batch-averaged, default)
-        Y1, logdet_avg = G.forward(X, C; logdet_per_batch=false)
+# Test with logdet_per_batch=false (default behavior, scalar output)
+Y_scalar, Cond_scalar, lgdet_scalar = G.forward(X_batch, Cond_batch; logdet_per_batch=false)
+@test lgdet_scalar isa Number
+@test size(lgdet_scalar) == ()
 
-        # Forward with per_batch=true
-        Y2, logdet_batch = G.forward(X, C; logdet_per_batch=true)
+# Test with logdet_per_batch=true (per-batch vector output)
+Y_batch, Cond_vec, lgdet_vector = G.forward(X_batch, Cond_batch; logdet_per_batch=true)
+@test lgdet_vector isa AbstractArray
+@test length(lgdet_vector) == batchsize
 
-        @test Y1 ≈ Y2
+# Test invertibility with per-batch option
+X_rec = G.inverse(Y_batch, Cond_vec)
+@test isapprox(norm(X_batch - X_rec)/norm(X_batch), 0f0, atol=1f-5)
 
-        # Check logdet dimensions
-        @test typeof(logdet_avg) <: Real
-        @test length(logdet_batch) == batchsize
+# Test accuracy of logdet with logdet_per_batch option
+@test isapprox(sum(lgdet_vector), lgdet_scalar * batchsize; atol=1f-1)
 
-        # Check that average of per-batch equals batch-averaged
-        @test isapprox(mean(logdet_batch), logdet_avg; rtol=1e-5)
-    end
+###################################################################################################
+# Test gradients are set and cleared
+G.backward(Y, Y, Cond)
 
-    @testset "NetworkConditionalGlow 2D - Invertibility" begin
-        nx, ny = 16, 16
-        n_in = 4
-        n_cond = 2
-        n_hidden = 8
-        depth = 2
-        K = 2
-        batchsize = 8
+P = get_params(G)
+gsum = 0
+for p in P
+    ~isnothing(p.grad) && (global gsum += 1)
+end
+@test isequal(gsum, L*K*10+2)
 
-        G = NetworkConditionalGlow(n_in, n_cond, n_hidden, depth, K; logdet=false)
-        X = randn(Float32, nx, ny, n_in, batchsize)
-        C = randn(Float32, nx, ny, n_cond, batchsize)
+clear_grad!(G)
+gsum = 0
+for p in P
+    ~isnothing(p.grad) && (global gsum += 1)
+end
+@test isequal(gsum, 0)
 
-        # Forward-inverse
-        Y = G.forward(X, C)
-        X_recon = G.inverse(Y, C)
 
-        @test isapprox(X, X_recon; rtol=1e-3)
+Random.seed!(3);
+# Define network
+nx = 32; ny = 32; nz = 32
+n_in = 2
+n_cond = 2
+n_hidden = 4
+batchsize = 2
+L = 2
+K = 2
+split_scales = true
+N = (nx,ny)
 
-        # Inverse-forward
-        Y2 = G.inverse(X, C)
-        X_recon2 = G.forward(Y2, C)
+########################################### Test with split_scales = true N = (nx,ny) #########################
+# Invertibility
 
-        @test isapprox(X, X_recon2; rtol=1e-3)
-    end
+# Network and input
+G = NetworkConditionalGlow(n_in, n_cond, n_hidden, L, K;split_scales=split_scales,ndims=length(N), rb_activation=LeakyReLUlayer()) |> device
+X = rand(Float32, N..., n_in, batchsize)  |> device
+Cond = rand(Float32, N..., n_cond, batchsize)  |> device
 
-    @testset "NetworkConditionalGlow 2D - Conditioning Effect" begin
-        # Test that different conditioning produces different outputs
-        nx, ny = 8, 8
-        n_in = 4
-        n_cond = 2
-        n_hidden = 8
-        depth = 1
-        K = 2
-        batchsize = 4
+Y, Cond, _ = G.forward(X,Cond)
+X_ = G.inverse(Y,Cond) # saving the cond is important in split scales because of reshapes
 
-        G = NetworkConditionalGlow(n_in, n_cond, n_hidden, depth, K; logdet=false)
-        X = randn(Float32, nx, ny, n_in, batchsize)
-        C1 = randn(Float32, nx, ny, n_cond, batchsize)
-        C2 = randn(Float32, nx, ny, n_cond, batchsize)
+@test isapprox(norm(X - X_)/norm(X), 0f0; atol=1f-5)
 
-        Y1 = G.forward(X, C1)
-        Y2 = G.forward(X, C2)
+###################################################################################################
+# Test logdet_per_batch option with split_scales=true
 
-        # Different conditioning should produce different outputs
-        @test !isapprox(Y1, Y2; rtol=0.1)
-    end
 
-    @testset "NetworkConditionalGlow 2D - Gradient Test (Input)" begin
-        nx, ny = 8, 8
-        n_in = 4
-        n_cond = 2
-        n_hidden = 8
-        depth = 1
-        K = 2
-        batchsize = 4
+X_batch = rand(Float32, N..., n_in, batchsize) |> device
+Cond_batch = rand(Float32, N..., n_cond, batchsize) |> device
 
-        G = NetworkConditionalGlow(n_in, n_cond, n_hidden, depth, K; logdet=true)
+# Test with logdet_per_batch=false (default behavior, scalar output)
+Y_scalar, Cond_scalar, lgdet_scalar = G.forward(X_batch, Cond_batch; logdet_per_batch=false)
+@test lgdet_scalar isa Number
+@test size(lgdet_scalar) == ()
 
-        X = randn(Float32, nx, ny, n_in, batchsize)
-        X0 = randn(Float32, nx, ny, n_in, batchsize)
-        C = randn(Float32, nx, ny, n_cond, batchsize)
-        dX = randn(Float32, nx, ny, n_in, batchsize)
+# Test with logdet_per_batch=true (per-batch vector output)
+Y_batch, Cond_vec, lgdet_vector = G.forward(X_batch, Cond_batch; logdet_per_batch=true)
+@test lgdet_vector isa AbstractArray
+@test length(lgdet_vector) == batchsize
 
-        # Loss function
-        function loss(G, X, C)
-            Y, logdet = G.forward(X, C)
-            f = -logdet + 0.5f0*norm(Y)^2f0
+# Test invertibility with per-batch option
+X_rec = G.inverse(Y_batch, Cond_vec)
+@test isapprox(norm(X_batch - X_rec)/norm(X_batch), 0f0, atol=1f-5)
 
-            ΔY = Y
-            ΔX, _ = G.backward(ΔY, Y, C)
+# Test accuracy of logdet with logdet_per_batch option
+@test isapprox(sum(lgdet_vector), lgdet_scalar * batchsize; atol=1f-1)
 
-            return f, ΔX
-        end
+###################################################################################################
+# Test gradients are set and cleared
+G.backward(Y, Y, Cond)
 
-        # Initial loss
-        f0, ΔX = loss(G, X0, C)
+P = get_params(G)
+gsum = 0
+for p in P
+    ~isnothing(p.grad) && (global gsum += 1)
+end
+@test isequal(gsum, L*K*10+2)
 
-        # Gradient test
-        h = 0.1f0
-        maxiter = 5
-        err1 = zeros(Float32, maxiter)
-        err2 = zeros(Float32, maxiter)
+clear_grad!(G)
+gsum = 0
+for p in P
+    ~isnothing(p.grad) && (global gsum += 1)
+end
+@test isequal(gsum, 0)
 
-        println("\nGradient test NetworkConditionalGlow 2D: input")
-        for j=1:maxiter
-            f = loss(G, X0 + h*dX, C)[1]
-            err1[j] = abs(f - f0)
-            err2[j] = abs(f - f0 - h*dot(dX, ΔX))
-            println("  Iter $j: err1=$(err1[j]), err2=$(err2[j])")
-            h /= 2f0
-        end
+###################################################################################################
+# Gradient test
 
-        @test isapprox(err1[end] / (err1[1]/2^(maxiter-1)), 1f0; atol=1f1)
-        @test isapprox(err2[end] / (err2[1]/4^(maxiter-1)), 1f0; atol=1f1)
-    end
-
-    @testset "NetworkConditionalGlow 2D - Gradient Test (Conditioning)" begin
-        nx, ny = 8, 8
-        n_in = 4
-        n_cond = 2
-        n_hidden = 8
-        depth = 1
-        K = 2
-        batchsize = 4
-
-        G = NetworkConditionalGlow(n_in, n_cond, n_hidden, depth, K; logdet=true)
-
-        X = randn(Float32, nx, ny, n_in, batchsize)
-        C = randn(Float32, nx, ny, n_cond, batchsize)
-        C0 = randn(Float32, nx, ny, n_cond, batchsize)
-        dC = randn(Float32, nx, ny, n_cond, batchsize)
-
-        # Loss function
-        function loss_cond(G, X, C)
-            Y, logdet = G.forward(X, C)
-            f = -logdet + 0.5f0*norm(Y)^2f0
-
-            ΔY = Y
-            _, ΔC = G.backward(ΔY, Y, C)
-
-            return f, ΔC
-        end
-
-        # Initial loss
-        f0, ΔC = loss_cond(G, X, C0)
-
-        # Gradient test
-        h = 0.1f0
-        maxiter = 5
-        err1 = zeros(Float32, maxiter)
-        err2 = zeros(Float32, maxiter)
-
-        println("\nGradient test NetworkConditionalGlow 2D: conditioning")
-        for j=1:maxiter
-            f = loss_cond(G, X, C0 + h*dC)[1]
-            err1[j] = abs(f - f0)
-            err2[j] = abs(f - f0 - h*dot(dC, ΔC))
-            println("  Iter $j: err1=$(err1[j]), err2=$(err2[j])")
-            h /= 2f0
-        end
-
-        @test isapprox(err1[end] / (err1[1]/2^(maxiter-1)), 1f0; atol=1f1)
-        @test isapprox(err2[end] / (err2[1]/4^(maxiter-1)), 1f0; atol=1f1)
-    end
-
-    @testset "NetworkConditionalGlow 2D - Gradient Test (Parameters)" begin
-        nx, ny = 8, 8
-        n_in = 4
-        n_cond = 2
-        n_hidden = 8
-        depth = 1
-        K = 2
-        batchsize = 4
-
-        # Two instances
-        G1 = NetworkConditionalGlow(n_in, n_cond, n_hidden, depth, K; logdet=true)
-        G2 = NetworkConditionalGlow(n_in, n_cond, n_hidden, depth, K; logdet=true)
-
-        X = randn(Float32, nx, ny, n_in, batchsize)
-        C = randn(Float32, nx, ny, n_cond, batchsize)
-
-        θ0 = deepcopy(get_params(G1))
-        θ = deepcopy(get_params(G2))
-
-        # Loss function
-        function loss_params(G, X, C)
-            Y, logdet = G.forward(X, C)
-            f = -logdet + 0.5f0*norm(Y)^2f0
-
-            ΔY = Y
-            G.backward(ΔY, Y, C)
-
-            return f, deepcopy(get_params(G))
-        end
-
-        f0, Δθ = loss_params(G1, X, C)
-
-        # Perturbation
-        dθ = θ - θ0
-        for i = 1:length(dθ)
-            if norm(θ0[i].data) != 0f0
-                dθ[i].data .*= norm(θ0[i].data)/norm(dθ[i].data)
-            end
-        end
-
-        # Gradient test
-        h = 0.1f0
-        maxiter = 5
-        err3 = zeros(Float32, maxiter)
-        err4 = zeros(Float32, maxiter)
-
-        println("\nGradient test NetworkConditionalGlow 2D: parameters")
-        for j=1:maxiter
-            θ_curr = θ0 + h*dθ
-            set_params!(G1, θ_curr)
-
-            f = loss_params(G1, X, C)[1]
-            err3[j] = abs(f - f0)
-            err4[j] = abs(f - f0 - h*dot(dθ, Δθ))
-            println("  Iter $j: err3=$(err3[j]), err4=$(err4[j])")
-            h /= 2f0
-        end
-
-        @test isapprox(err3[end] / (err3[1]/2^(maxiter-1)), 1f0; atol=1f1)
-        @test isapprox(err4[end] / (err4[1]/4^(maxiter-1)), 1f0; atol=1f1)
-    end
-
-    @testset "NetworkConditionalGlow - Conditional Sampling" begin
-        # Test generating samples conditioned on C
-        nx, ny = 8, 8
-        n_in = 4
-        n_cond = 2
-        n_hidden = 8
-        depth = 1
-        K = 2
-        batchsize = 4
-
-        G = NetworkConditionalGlow(n_in, n_cond, n_hidden, depth, K; logdet=false)
-
-        # Sample from latent with conditioning
-        Z = randn(Float32, nx, ny, n_in, batchsize)
-        C = randn(Float32, nx, ny, n_cond, batchsize)
-        X = G.inverse(Z, C)
-
-        @test size(X) == size(Z)
-        @test all(isfinite.(X))
-    end
-
+function loss(G, X, Cond)
+    Y, ZC, logdet = G.forward(X, Cond)
+    f = -log_likelihood(Y) - logdet
+    ΔY = -∇log_likelihood(Y)
+    ΔX, X_ = G.backward(ΔY, Y, ZC)
+    return f, ΔX, G.CL[1,1].RB.W1.grad, G.CL[1,1].C.v1.grad
 end
 
-println("\n✓ All NetworkConditionalGlow tests passed!")
+
+# Gradient test w.r.t. input
+G = NetworkConditionalGlow(n_in, n_cond, n_hidden, L, K;split_scales=split_scales,ndims=length(N), rb_activation=LeakyReLUlayer())  |> device
+X = rand(Float32, N..., n_in, batchsize)  |> device
+Cond = rand(Float32, N..., n_cond, batchsize)  |> device
+X0 = rand(Float32, N..., n_in, batchsize)  |> device
+Cond0 = rand(Float32, N..., n_cond, batchsize)  |> device
+
+dX = X - X0
+
+f0, ΔX = loss(G, X0, Cond0)[1:2]
+h = 0.1f0
+maxiter = 4
+err1 = zeros(Float32, maxiter)
+err2 = zeros(Float32, maxiter)
+
+print("\nGradient test glow: input\n")
+for j=1:maxiter
+    f = loss(G, X0 + h*dX, Cond0)[1]
+    err1[j] = abs(f - f0)
+    err2[j] = abs(f - f0 - h*dot(dX, ΔX))
+    print(err1[j], "; ", err2[j], "\n")
+    global h = h/2f0
+end
+
+@test isapprox(err1[end] / (err1[1]/2^(maxiter-1)), 1f0; atol=1f0)
+@test isapprox(err2[end] / (err2[1]/4^(maxiter-1)), 1f0; atol=1f0)
+
+
+# Gradient test w.r.t. parameters
+X = rand(Float32, N..., n_in, batchsize) |> device
+G = NetworkConditionalGlow(n_in, n_cond, n_hidden, L, K;split_scales=split_scales,ndims=length(N), rb_activation=LeakyReLUlayer()) |> device
+G0 = NetworkConditionalGlow(n_in, n_cond, n_hidden, L, K;split_scales=split_scales,ndims=length(N), rb_activation=LeakyReLUlayer()) |> device
+Gini = deepcopy(G0)
+
+# Test one parameter from residual block and 1x1 conv
+dW = G.CL[1,1].RB.W1.data - G0.CL[1,1].RB.W1.data
+dv = G.CL[1,1].C.v1.data - G0.CL[1,1].C.v1.data
+
+f0, ΔX, ΔW, Δv = loss(G0, X, Cond)
+h = 0.1f0
+maxiter = 4
+err3 = zeros(Float32, maxiter)
+err4 = zeros(Float32, maxiter)
+
+print("\nGradient test glow: input\n")
+for j=1:maxiter
+    G0.CL[1,1].RB.W1.data = Gini.CL[1,1].RB.W1.data + h*dW
+    G0.CL[1,1].C.v1.data = Gini.CL[1,1].C.v1.data + h*dv
+
+    f = loss(G0, X, Cond)[1]
+    err3[j] = abs(f - f0)
+    err4[j] = abs(f - f0 - h*dot(dW, ΔW) - h*dot(dv, Δv))
+    print(err3[j], "; ", err4[j], "\n")
+    global h = h/2f0
+end
+
+@test isapprox(err3[end] / (err3[1]/2^(maxiter-1)), 1f0; atol=1f0)
+@test isapprox(err4[end] / (err4[1]/4^(maxiter-1)), 1f0; atol=1f0)
+
+
+###################################################################################################
+# Gradient test with logdet_per_batch option
+
+# Loss function with logdet_per_batch
+function loss_per_batch(G, X, Cond)
+    Y, ZC, logdet_vec = G.forward(X, Cond; logdet_per_batch=true)
+    batchsize_loc = size(X)[end]
+    f = -log_likelihood(Y) - sum(logdet_vec)/batchsize_loc
+    ΔY = -∇log_likelihood(Y)
+    ΔX, X_ = G.backward(ΔY, Y, ZC)
+    return f, ΔX, G.CL[1,1].RB.W1.grad, G.CL[1,1].C.v1.grad
+end
+
+batchsize_pb = 4
+X_pb = rand(Float32, N..., n_in, batchsize_pb) |> device
+Cond_pb = rand(Float32, N..., n_cond, batchsize_pb) |> device
+X0_pb = rand(Float32, N..., n_in, batchsize_pb) |> device
+Cond0_pb = rand(Float32, N..., n_cond, batchsize_pb) |> device
+dX_pb = X_pb - X0_pb
+
+G_pb = NetworkConditionalGlow(n_in, n_cond, n_hidden, L, K; split_scales=split_scales, ndims=length(N), rb_activation=LeakyReLUlayer()) |> device
+
+# Gradient test w.r.t. input with logdet_per_batch
+f0_pb, ΔX_pb = loss_per_batch(G_pb, X0_pb, Cond0_pb)[1:2]
+h = 0.1f0
+maxiter = 4
+err_pb1 = zeros(Float32, maxiter)
+err_pb2 = zeros(Float32, maxiter)
+
+print("\nGradient test glow with logdet_per_batch: input\n")
+for j=1:maxiter
+    f = loss_per_batch(G_pb, X0_pb + h*dX_pb, Cond0_pb)[1]
+    err_pb1[j] = abs(f - f0_pb)
+    err_pb2[j] = abs(f - f0_pb - h*dot(dX_pb, ΔX_pb))
+    print(err_pb1[j], "; ", err_pb2[j], "\n")
+    global h = h/2f0
+end
+
+@test isapprox(err_pb1[end] / (err_pb1[1]/2^(maxiter-1)), 1f0; atol=1f0)
+@test isapprox(err_pb2[end] / (err_pb2[1]/4^(maxiter-1)), 1f0; atol=1f0)
+
+
+########################################### Test with split_scales = true N = (nx,ny) and summary network #########################
+# Invertibility
+sum_net = ResNet(n_cond, 16, 3; norm=nothing) # make sure it doesnt have any weird normalizations
+
+# Network and input
+flow = NetworkConditionalGlow(n_in, n_cond, n_hidden, L, K; split_scales=split_scales,ndims=length(N), rb_activation=LeakyReLUlayer())
+G = SummarizedNet(flow, sum_net)  |> device
+
+X = rand(Float32, N..., n_in, batchsize) |> device;
+Cond = rand(Float32, N..., n_cond, batchsize) |> device;
+
+Y, ZCond, _ = G.forward(X,Cond)
+X_ = G.inverse(Y,ZCond) # saving the cond is important in split scales because of reshapes
+
+@test isapprox(norm(X - X_)/norm(X), 0f0; atol=1f-5)
+
+# Test gradients are set and cleared
+G.backward(Y, Y, ZCond; Y_save = Cond)
+
+P = get_params(G)
+gsum = 0
+for p in P
+    ~isnothing(p.grad) && (global gsum += 1)
+end
+@test isequal(gsum, L*K*10+2+12) # depends on summary net you use
+
+clear_grad!(G)
+gsum = 0
+for p in P
+    ~isnothing(p.grad) && (global gsum += 1)
+end
+@test isequal(gsum, 0)
+
+
+# Gradient test
+function loss_sum(G, X, Cond)
+    Y, ZC, logdet = G.forward(X, Cond)
+    f = -log_likelihood(Y) - logdet
+    ΔY = -∇log_likelihood(Y)
+    ΔX, X_ = G.backward(ΔY, Y, ZC; Y_save=Cond)
+    return f, ΔX, G.cond_net.CL[1,1].RB.W1.grad, G.cond_net.CL[1,1].C.v1.grad
+end
+
+# Gradient test w.r.t. input
+X = rand(Float32, N..., n_in, batchsize) |> device;
+Cond = rand(Float32, N..., n_cond, batchsize) |> device;
+X0 = rand(Float32, N..., n_in, batchsize) |> device;
+Cond0 = rand(Float32, N..., n_cond, batchsize) |> device;
+
+dX = X - X0
+
+f0, ΔX = loss_sum(G, X0, Cond0)[1:2]
+h = 0.1f0
+maxiter = 4
+err1 = zeros(Float32, maxiter)
+err2 = zeros(Float32, maxiter)
+
+print("\nGradient test glow: input\n")
+for j=1:maxiter
+    f = loss_sum(G, X0 + h*dX, Cond0)[1]
+    err1[j] = abs(f - f0)
+    err2[j] = abs(f - f0 - h*dot(dX, ΔX))
+    print(err1[j], "; ", err2[j], "\n")
+    global h = h/2f0
+end
+
+@test isapprox(err1[end] / (err1[1]/2^(maxiter-1)), 1f0; atol=1f0)
+@test isapprox(err2[end] / (err2[1]/4^(maxiter-1)), 1f0; atol=1f0)
+
+
+# Gradient test w.r.t. parameters
+X = rand(Float32, N..., n_in, batchsize) |> device
+flow0 = NetworkConditionalGlow(n_in, n_cond, n_hidden, L, K; split_scales=split_scales,ndims=length(N), rb_activation=LeakyReLUlayer()) |> device
+G0 = SummarizedNet(flow0, sum_net) |> device
+Gini = deepcopy(G0)
+
+# Test one parameter from residual block and 1x1 conv
+dW = G.cond_net.CL[1,1].RB.W1.data - G0.cond_net.CL[1,1].RB.W1.data
+dv = G.cond_net.CL[1,1].C.v1.data - G0.cond_net.CL[1,1].C.v1.data
+
+f0, ΔX, ΔW, Δv = loss_sum(G0, X, Cond)
+h = 0.1f0
+maxiter = 4
+err3 = zeros(Float32, maxiter)
+err4 = zeros(Float32, maxiter)
+
+print("\nGradient test glow: input\n")
+for j=1:maxiter
+    G0.cond_net.CL[1,1].RB.W1.data = Gini.cond_net.CL[1,1].RB.W1.data + h*dW
+    G0.cond_net.CL[1,1].C.v1.data = Gini.cond_net.CL[1,1].C.v1.data + h*dv
+
+    f = loss_sum(G0, X, Cond)[1]
+    err3[j] = abs(f - f0)
+    err4[j] = abs(f - f0 - h*dot(dW, ΔW) - h*dot(dv, Δv))
+    print(err3[j], "; ", err4[j], "\n")
+    global h = h/2f0
+end
+
+@test isapprox(err3[end] / (err3[1]/2^(maxiter-1)), 1f0; atol=1f0)
+@test isapprox(err4[end] / (err4[1]/4^(maxiter-1)), 1f0; atol=1f0)
+
+
+N = (nx,ny,nz)
+########################################### Test with split_scales = true N = (nx,ny,nz) #########################
+# Invertibility
+
+# Network and input
+G = NetworkConditionalGlow(n_in, n_cond, n_hidden, L, K;split_scales=split_scales,ndims=length(N), rb_activation=LeakyReLUlayer()) |> device
+X = rand(Float32, N..., n_in, batchsize) |> device
+Cond = rand(Float32, N..., n_cond, batchsize) |> device
+
+Y, Cond, _ = G.forward(X,Cond)
+X_ = G.inverse(Y,Cond) # saving the cond is important in split scales because of reshapes
+
+@test isapprox(norm(X - X_)/norm(X), 0f0; atol=1f-5)
+
+# Test gradients are set and cleared
+G.backward(Y, Y, Cond)
+
+P = get_params(G)
+gsum = 0
+for p in P
+    ~isnothing(p.grad) && (global gsum += 1)
+end
+@test isequal(gsum, L*K*10+2)
+
+clear_grad!(G)
+gsum = 0
+for p in P
+    ~isnothing(p.grad) && (global gsum += 1)
+end
+@test isequal(gsum, 0)
+
+
+# Gradient test
+
+
+# Gradient test w.r.t. input
+G = NetworkConditionalGlow(n_in, n_cond, n_hidden, L, K;split_scales=split_scales,ndims=length(N), rb_activation=LeakyReLUlayer()) |> device
+X = rand(Float32, N..., n_in, batchsize) |> device
+Cond = rand(Float32, N..., n_cond, batchsize) |> device
+X0 = rand(Float32, N..., n_in, batchsize) |> device
+Cond0 = rand(Float32, N..., n_cond, batchsize) |> device
+
+dX = X - X0
+
+f0, ΔX = loss(G, X0, Cond0)[1:2]
+h = 0.1f0
+maxiter = 4
+err1 = zeros(Float32, maxiter)
+err2 = zeros(Float32, maxiter)
+
+print("\nGradient test glow: input\n")
+for j=1:maxiter
+    f = loss(G, X0 + h*dX, Cond0)[1]
+    err1[j] = abs(f - f0)
+    err2[j] = abs(f - f0 - h*dot(dX, ΔX))
+    print(err1[j], "; ", err2[j], "\n")
+    global h = h/2f0
+end
+
+@test isapprox(err1[end] / (err1[1]/2^(maxiter-1)), 1f0; atol=1f0)
+@test isapprox(err2[end] / (err2[1]/4^(maxiter-1)), 1f0; atol=1f0)
+
+
+# Gradient test w.r.t. parameters
+X = rand(Float32, N..., n_in, batchsize) |> device
+G = NetworkConditionalGlow(n_in, n_cond, n_hidden, L, K;split_scales=split_scales,ndims=length(N), rb_activation=LeakyReLUlayer()) |> device
+G0 = NetworkConditionalGlow(n_in, n_cond, n_hidden, L, K;split_scales=split_scales,ndims=length(N), rb_activation=LeakyReLUlayer()) |> device
+Gini = deepcopy(G0)
+
+# Test one parameter from residual block and 1x1 conv
+dW = G.CL[1,1].RB.W1.data - G0.CL[1,1].RB.W1.data
+dv = G.CL[1,1].C.v1.data - G0.CL[1,1].C.v1.data
+
+f0, ΔX, ΔW, Δv = loss(G0, X, Cond)
+h = 0.1f0
+maxiter = 4
+err3 = zeros(Float32, maxiter)
+err4 = zeros(Float32, maxiter)
+
+print("\nGradient test glow: input\n")
+for j=1:maxiter
+    G0.CL[1,1].RB.W1.data = Gini.CL[1,1].RB.W1.data + h*dW
+    G0.CL[1,1].C.v1.data = Gini.CL[1,1].C.v1.data + h*dv
+
+    f = loss(G0, X, Cond)[1]
+    err3[j] = abs(f - f0)
+    err4[j] = abs(f - f0 - h*dot(dW, ΔW) - h*dot(dv, Δv))
+    print(err3[j], "; ", err4[j], "\n")
+    global h = h/2f0
+end
+
+@test isapprox(err3[end] / (err3[1]/2^(maxiter-1)), 1f0; atol=1f0)
+@test isapprox(err4[end] / (err4[1]/4^(maxiter-1)), 1f0; atol=1f0)
+
+
+########################################### Test with split_scales = true N = (nx,ny,nz) and Summary network #########################
+# Invertibility
+sum_net_3d = ResNet(n_cond, 16, 3; ndims=3, norm=nothing)  |> device# make sure it doesnt have any weird normalizati8ons
+
+# Network and input
+flow = NetworkConditionalGlow(n_in, n_cond, n_hidden, L, K; split_scales=split_scales,ndims=length(N), rb_activation=LeakyReLUlayer()) |> device;
+G = SummarizedNet(flow, sum_net_3d) |> device
+
+X = rand(Float32, N..., n_in, batchsize) |> device;
+Cond = rand(Float32, N..., n_cond, batchsize) |> device;
+
+Y, ZCond, _ = G.forward(X,Cond);
+X_ = G.inverse(Y,ZCond); # saving the cond is important in split scales because of reshapes
+
+@test isapprox(norm(X - X_)/norm(X), 0f0; atol=1f-5)
+
+# Test gradients are set and cleared
+G.backward(Y, Y, ZCond; Y_save=Cond)
+
+P = get_params(G)
+gsum = 0
+for p in P
+    ~isnothing(p.grad) && (global gsum += 1)
+end
+@test isequal(gsum, L*K*10+2+12)
+
+clear_grad!(G)
+gsum = 0
+for p in P
+    ~isnothing(p.grad) && (global gsum += 1)
+end
+@test isequal(gsum, 0)
+
+
+# Gradient test
+
+
+# Gradient test w.r.t. input
+X = rand(Float32, N..., n_in, batchsize) |> device;
+Cond = rand(Float32, N..., n_cond, batchsize) |> device;
+X0 = rand(Float32, N..., n_in, batchsize) |> device;
+Cond0 = rand(Float32, N..., n_cond, batchsize) |> device;
+
+dX = X - X0;
+
+f0, ΔX = loss_sum(G, X0, Cond0)[1:2];
+h = 0.1f0
+maxiter = 4
+err1 = zeros(Float32, maxiter)
+err2 = zeros(Float32, maxiter)
+
+print("\nGradient test glow: input\n")
+for j=1:maxiter
+    f = loss_sum(G, X0 + h*dX, Cond0)[1]
+    err1[j] = abs(f - f0)
+    err2[j] = abs(f - f0 - h*dot(dX, ΔX))
+    print(err1[j], "; ", err2[j], "\n")
+    global h = h/2f0
+end
+
+@test isapprox(err1[end] / (err1[1]/2^(maxiter-1)), 1f0; atol=1f0)
+@test isapprox(err2[end] / (err2[1]/4^(maxiter-1)), 1f0; atol=1f0)
+
+# Gradient test w.r.t. parameters
+X = rand(Float32, N..., n_in, batchsize) |> device
+flow0 = NetworkConditionalGlow(n_in, n_cond, n_hidden, L, K; split_scales=split_scales,ndims=length(N), rb_activation=LeakyReLUlayer()) |> device
+G0 = SummarizedNet(flow0, sum_net_3d) |> device
+Gini = deepcopy(G0)
+
+# Test one parameter from residual block and 1x1 conv
+dW = G.cond_net.CL[1,1].RB.W1.data - G0.cond_net.CL[1,1].RB.W1.data
+dv = G.cond_net.CL[1,1].C.v1.data - G0.cond_net.CL[1,1].C.v1.data
+
+f0, ΔX, ΔW, Δv = loss_sum(G0, X, Cond);
+h = 0.1f0
+maxiter = 4
+err3 = zeros(Float32, maxiter)
+err4 = zeros(Float32, maxiter)
+
+print("\nGradient test glow: input\n")
+for j=1:maxiter
+    G0.cond_net.CL[1,1].RB.W1.data = Gini.cond_net.CL[1,1].RB.W1.data + h*dW
+    G0.cond_net.CL[1,1].C.v1.data = Gini.cond_net.CL[1,1].C.v1.data + h*dv
+
+    f = loss_sum(G0, X, Cond)[1]
+    err3[j] = abs(f - f0)
+    err4[j] = abs(f - f0 - h*dot(dW, ΔW) - h*dot(dv, Δv))
+    print(err3[j], "; ", err4[j], "\n")
+    global h = h/2f0
+end
+
+@test isapprox(err3[end] / (err3[1]/2^(maxiter-1)), 1f0; atol=1f0)
+@test isapprox(err4[end] / (err4[1]/4^(maxiter-1)), 1f0; atol=1f0)
