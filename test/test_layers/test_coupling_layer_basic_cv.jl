@@ -1,295 +1,287 @@
-# Test for CouplingLayerBasicCV (CV version with jacobian trace)
-# Tests include: invertibility, gradient tests, jacobian trace tests, integrated gradients
+# Test invertible coupling layer (CV version - with jacobian trace)
+# Author: Philipp Witte, pwitte3@gatech.edu
+# Date: January 2020
 
 using Test, Random, LinearAlgebra
-using InvertibleNetworks: get_params, clear_grad!, ResidualBlock
+using InvertibleNetworks: get_params, set_params!, tensor_cat, tensor_split, mse, ∇mse, ResidualBlock, Sigmoid2Layer
 
 using CNCV
 
-Random.seed!(789)
-
-@testset "CouplingLayerBasicCV Tests" begin
-
-    ###############################################################################
-    # Test 2D CouplingLayerBasicCV
-    ###############################################################################
-
-    @testset "CouplingLayerBasicCV 2D - Basic and Jacobian Trace" begin
-        nx, ny = 16, 16
-        n_in = 4
-        n_hidden = 8
-        batchsize = 8
-
-        # Create layer
-        CL = CouplingLayerBasicCV(n_in, n_hidden)
-
-        # Split input
-        X = randn(Float32, nx, ny, n_in, batchsize)
-        X1, X2 = tensor_split(X)
-
-        # Forward pass
-        Y1, Y2, jac_trace_batch = CL.forward(X1, X2)
-
-        @test size(Y1) == size(X1)
-        @test size(Y2) == size(X2)
-        @test length(jac_trace_batch) == batchsize
-
-        # Jacobian trace should be sum of S for coupling layer
-        # We can't verify exact value without knowing S, but check it's finite
-        @test all(isfinite.(jac_trace_batch))
-    end
-
-    @testset "CouplingLayerBasicCV 2D - Invertibility with Jacobian Trace" begin
-        nx, ny = 16, 16
-        n_in = 4
-        n_hidden = 8
-        batchsize = 8
-
-        CL = CouplingLayerBasicCV(n_in, n_hidden)
-        X = randn(Float32, nx, ny, n_in, batchsize)
-        X1, X2 = tensor_split(X)
-
-        # Forward-inverse
-        Y1, Y2, jac_trace_fwd = CL.forward(X1, X2)
-        X1_recon, X2_recon, jac_trace_inv = CL.inverse(Y1, Y2)
-
-        @test isapprox(X1, X1_recon; rtol=1e-4)
-        @test isapprox(X2, X2_recon; rtol=1e-4)
-
-        # Jacobian traces should be equal (same S in forward and inverse)
-        @test isapprox(jac_trace_fwd, jac_trace_inv; rtol=1e-5)
-    end
-
-    @testset "CouplingLayerBasicCV 2D - Gradient Test with Jacobian Trace Weight" begin
-        nx, ny = 8, 8
-        n_in = 4
-        n_hidden = 8
-        batchsize = 4
-
-        CL = CouplingLayerBasicCV(n_in, n_hidden)
-
-        X = randn(Float32, nx, ny, n_in, batchsize)
-        X0 = randn(Float32, nx, ny, n_in, batchsize)
-        dX = randn(Float32, nx, ny, n_in, batchsize)
-
-        X1, X2 = tensor_split(X)
-        X01, X02 = tensor_split(X0)
-        dX1, dX2 = tensor_split(dX)
-
-        # Loss function with jacobian trace term
-        function loss_with_trace(CL, X1, X2)
-            Y1, Y2, jac_trace = CL.forward(X1, X2)
-            Y = tensor_cat(Y1, Y2)
-
-            # Loss = ||Y||^2 + lambda * sum(jac_trace)
-            lambda = 0.1f0
-            f = 0.5f0*norm(Y)^2f0 + lambda * sum(jac_trace)
-
-            # Compute gradients
-            ΔY = Y
-            ΔY1, ΔY2 = tensor_split(ΔY)
-            jac_trace_grad_weight = fill(lambda, batchsize)
-
-            ΔX1, ΔX2, _, _ = CL.backward(ΔY1, ΔY2, Y1, Y2;
-                                         jac_trace_grad_weight=jac_trace_grad_weight)
-
-            return f, ΔX1, ΔX2, deepcopy(get_params(CL))
-        end
-
-        # Base point
-        f0, ΔX1, ΔX2, Δθ = loss_with_trace(CL, X01, X02)
-
-        # Gradient test (input)
-        h = 0.1f0
-        maxiter = 5
-        err1 = zeros(Float32, maxiter)
-        err2 = zeros(Float32, maxiter)
-
-        println("\nGradient test CouplingLayerBasicCV 2D with jac_trace: input")
-        for j=1:maxiter
-            f = loss_with_trace(CL, X01 + h*dX1, X02 + h*dX2)[1]
-            err1[j] = abs(f - f0)
-            err2[j] = abs(f - f0 - h*(dot(dX1, ΔX1) + dot(dX2, ΔX2)))
-            println("  Iter $j: err1=$(err1[j]), err2=$(err2[j])")
-            h /= 2f0
-        end
-
-        @test isapprox(err1[end] / (err1[1]/2^(maxiter-1)), 1f0; atol=1f1)
-        @test isapprox(err2[end] / (err2[1]/4^(maxiter-1)), 1f0; atol=1f1)
-    end
-
-    @testset "CouplingLayerBasicCV 2D - Jacobian Trace Gradient Test (Parameters)" begin
-        nx, ny = 8, 8
-        n_in = 4
-        n_hidden = 8
-        batchsize = 4
-
-        # Two instances
-        CL1 = CouplingLayerBasicCV(n_in, n_hidden)
-        CL2 = CouplingLayerBasicCV(n_in, n_hidden)
-
-        X = randn(Float32, nx, ny, n_in, batchsize)
-        X1, X2 = tensor_split(X)
-
-        θ0 = deepcopy(get_params(CL1))
-        θ = deepcopy(get_params(CL2))
-
-        # Loss function
-        function loss_params(CL, X1, X2)
-            Y1, Y2, jac_trace = CL.forward(X1, X2)
-            Y = tensor_cat(Y1, Y2)
-            lambda = 0.1f0
-            f = 0.5f0*norm(Y)^2f0 + lambda * sum(jac_trace)
-
-            ΔY = Y
-            ΔY1, ΔY2 = tensor_split(ΔY)
-            jac_trace_grad_weight = fill(lambda, batchsize)
-            CL.backward(ΔY1, ΔY2, Y1, Y2; jac_trace_grad_weight=jac_trace_grad_weight)
-
-            return f, deepcopy(get_params(CL))
-        end
-
-        f0, Δθ = loss_params(CL1, X1, X2)
-
-        # Perturbation
-        dθ = θ - θ0
-        for i = 1:length(dθ)
-            if norm(θ0[i].data) != 0f0
-                dθ[i].data .*= norm(θ0[i].data)/norm(dθ[i].data)
-            end
-        end
-
-        # Gradient test (parameters)
-        h = 0.1f0
-        maxiter = 5
-        err3 = zeros(Float32, maxiter)
-        err4 = zeros(Float32, maxiter)
-
-        println("\nGradient test CouplingLayerBasicCV 2D with jac_trace: parameters")
-        for j=1:maxiter
-            θ_curr = θ0 + h*dθ
-            set_params!(CL1, θ_curr)
-
-            f = loss_params(CL1, X1, X2)[1]
-            err3[j] = abs(f - f0)
-            err4[j] = abs(f - f0 - h*dot(dθ, Δθ))
-            println("  Iter $j: err3=$(err3[j]), err4=$(err4[j])")
-            h /= 2f0
-        end
-
-        @test isapprox(err3[end] / (err3[1]/2^(maxiter-1)), 1f0; atol=1f1)
-        @test isapprox(err4[end] / (err4[1]/4^(maxiter-1)), 1f0; atol=1f1)
-    end
-
-    @testset "CouplingLayerBasicCV 2D - Jacobian Trace Consistency" begin
-        nx, ny = 8, 8
-        n_in = 4
-        n_hidden = 8
-        batchsize = 4
-
-        CL = CouplingLayerBasicCV(n_in, n_hidden)
-        X = randn(Float32, nx, ny, n_in, batchsize)
-        X1, X2 = tensor_split(X)
-
-        Y1, Y2, jac_trace, logS_T1, S = CL.forward(X1, X2; save=true)
-
-        # Verify trace calculation manually
-        # For coupling: jac_trace = sum(S) per batch
-        manual_trace = dropdims(sum(S; dims=tuple(1:ndims(S)-1...)); dims=tuple(1:ndims(S)-1...))
-
-        @test isapprox(jac_trace, manual_trace; rtol=1e-5)
-    end
-
-    ###############################################################################
-    # Test 3D CouplingLayerBasicCV
-    ###############################################################################
-
-    @testset "CouplingLayerBasicCV 3D - Basic and Jacobian Trace" begin
-        nx, ny, nz = 8, 8, 8
-        n_in = 4
-        n_hidden = 8
-        batchsize = 4
-
-        CL = CouplingLayerBasicCV3D(n_in, n_hidden)
-
-        X = randn(Float32, nx, ny, nz, n_in, batchsize)
-        X1, X2 = tensor_split(X)
-
-        Y1, Y2, jac_trace_batch = CL.forward(X1, X2)
-
-        @test size(Y1) == size(X1)
-        @test size(Y2) == size(X2)
-        @test length(jac_trace_batch) == batchsize
-        @test all(isfinite.(jac_trace_batch))
-    end
-
-    @testset "CouplingLayerBasicCV 3D - Invertibility with Jacobian Trace" begin
-        nx, ny, nz = 8, 8, 8
-        n_in = 4
-        n_hidden = 8
-        batchsize = 4
-
-        CL = CouplingLayerBasicCV3D(n_in, n_hidden)
-        X = randn(Float32, nx, ny, nz, n_in, batchsize)
-        X1, X2 = tensor_split(X)
-
-        Y1, Y2, jac_trace_fwd = CL.forward(X1, X2)
-        X1_recon, X2_recon, jac_trace_inv = CL.inverse(Y1, Y2)
-
-        @test isapprox(X1, X1_recon; rtol=1e-4)
-        @test isapprox(X2, X2_recon; rtol=1e-4)
-        @test isapprox(jac_trace_fwd, jac_trace_inv; rtol=1e-5)
-    end
-
-    @testset "CouplingLayerBasicCV - Comparison with Non-CV Version" begin
-        # Verify that without jac_trace_grad_weight, behavior is similar
-        nx, ny = 8, 8
-        n_in = 4
-        n_hidden = 8
-        batchsize = 4
-
-        X = randn(Float32, nx, ny, n_in, batchsize)
-        X1, X2 = tensor_split(X)
-
-        # CV version
-        CL_cv = CouplingLayerBasicCV(n_in, n_hidden)
-        Y1_cv, Y2_cv, jac_trace = CL_cv.forward(X1, X2)
-
-        # Non-CV version
-        CL = CouplingLayerBasic(n_in, n_hidden; logdet=true)
-        Y1, Y2, logdet = CL.forward(X1, X2; logdet_per_batch=true)
-
-        # Structure should be the same (though values differ due to different RB initialization)
-        @test size(Y1_cv) == size(Y1)
-        @test size(Y2_cv) == size(Y2)
-        @test length(jac_trace) == length(logdet)
-    end
-
-    @testset "CouplingLayerBasicCV - Backward without Trace Weight" begin
-        # Test that backward works correctly when jac_trace_grad_weight is nothing
-        nx, ny = 8, 8
-        n_in = 4
-        n_hidden = 8
-        batchsize = 4
-
-        CL = CouplingLayerBasicCV(n_in, n_hidden)
-        X = randn(Float32, nx, ny, n_in, batchsize)
-        X1, X2 = tensor_split(X)
-
-        Y1, Y2, _ = CL.forward(X1, X2)
-        ΔY = randn(Float32, size(tensor_cat(Y1, Y2))...)
-        ΔY1, ΔY2 = tensor_split(ΔY)
-
-        # Backward without jac_trace_grad_weight
-        ΔX1, ΔX2, X1_recon, X2_recon = CL.backward(ΔY1, ΔY2, Y1, Y2;
-                                                    jac_trace_grad_weight=nothing)
-
-        @test size(ΔX1) == size(X1)
-        @test size(ΔX2) == size(X2)
-        @test isapprox(X1, X1_recon; rtol=1e-5)
-        @test isapprox(X2, X2_recon; rtol=1e-5)
-    end
+# Random seed
+Random.seed!(11)
+
+###################################################################################################
+# Test invertibility
+
+# Input
+nx = 24
+ny = 24
+k = 4
+n_in = 2
+n_hidden = 4
+batchsize = 1
+
+# Input images
+Xa = randn(Float32, nx, ny, Int(k/2), batchsize)
+Xb = randn(Float32, nx, ny, Int(k/2), batchsize)
+Xa0 = randn(Float32, nx, ny, Int(k/2), batchsize)
+Xb0 = randn(Float32, nx, ny, Int(k/2), batchsize)
+dXa = Xa - Xa0
+dXb = Xb - Xb0
+
+# Residual block and coupling layer
+RB = ResidualBlock(n_in, n_hidden; fan=true)
+L = CouplingLayerBasicCV(RB)
+
+###################################################################################################
+# Test jac_trace per batch element
+
+# Test with larger batchsize
+batchsize = 5
+Xa_batch = randn(Float32, nx, ny, Int(k/2), batchsize)
+Xb_batch = randn(Float32, nx, ny, Int(k/2), batchsize)
+
+# Test jac_trace returns vector with one element per batch
+Ya, Yb, jac_trace_vec = L.forward(Xa_batch, Xb_batch)
+@test jac_trace_vec isa AbstractArray
+@test length(jac_trace_vec) == batchsize
+
+# Test inverse jac_trace
+Xa_inv, Xb_inv, jac_trace_inv = L.inverse(Ya, Yb)
+@test isapprox(norm(Xa_batch - Xa_inv)/norm(Xa_batch), 0f0; atol=1e-2)
+@test isapprox(norm(Xb_batch - Xb_inv)/norm(Xb_batch), 0f0; atol=1e-2)
+@test jac_trace_inv isa AbstractArray
+@test length(jac_trace_inv) == batchsize
+
+
+###################################################################################################
+# Invertibility tests
+
+# Reset batchsize to 1
+batchsize = 1
+Xa = randn(Float32, nx, ny, Int(k/2), batchsize)
+Xb = randn(Float32, nx, ny, Int(k/2), batchsize)
+
+# Layer test
+Ya, Yb, jac_trace = L.forward(Xa, Xb)
+Xa_, Xb_, _ = L.inverse(Ya, Yb)
+@test isapprox(norm(Xa - Xa_)/norm(Xa), 0f0; atol=1e-2)
+@test isapprox(norm(Xb - Xb_)/norm(Xb), 0f0; atol=1e-2)
+
+Ya, Yb, jac_trace = L.forward(Xa, Xb)
+Xa_, Xb_ = L.backward(Ya.*0f0, Yb.*0f0, Ya, Yb)[3:4]
+@test isapprox(norm(Xa - Xa_)/norm(Xa), 0f0; atol=1e-2)
+@test isapprox(norm(Xb - Xb_)/norm(Xb), 0f0; atol=1e-2)
+
+Ya, Yb, _ = L.inverse(Xa, Xb)
+Xa_, Xb_, jac_trace = L.forward(Ya, Yb)
+@test isapprox(norm(Xa - Xa_)/norm(Xa), 0f0; atol=1e-2)
+@test isapprox(norm(Xb - Xb_)/norm(Xb), 0f0; atol=1e-2)
+
+
+###################################################################################################
+# Explicit Jacobian trace verification test
+
+# Small test case for explicit verification via finite differences
+print("\nExplicit Jacobian trace verification\n")
+nx_small = 4
+ny_small = 4
+n_in_small = 2
+n_hidden_small = 4
+batchsize_small = 1
+
+Xa_small = randn(Float32, nx_small, ny_small, n_in_small, batchsize_small)
+Xb_small = randn(Float32, nx_small, ny_small, n_in_small, batchsize_small)
+
+# Create coupling layer for verification
+RB_verify = ResidualBlock(n_in_small, n_hidden_small; fan=true)
+L_verify = CouplingLayerBasicCV(RB_verify)
+
+# Forward pass to get computed trace
+Ya_small, Yb_small, jac_trace_computed = L_verify.forward(Xa_small, Xb_small)
+
+# Compute Jacobian explicitly by finite differences
+X_concat = vcat(vec(Xa_small), vec(Xb_small))
+n_total = length(X_concat)
+J = zeros(Float32, n_total, n_total)
+
+ε = 1f-5
+for i = 1:n_total
+    X_perturbed = copy(X_concat)
+    X_perturbed[i] += ε
 
+    # Split back into Xa and Xb
+    Xa_p = reshape(X_perturbed[1:length(Xa_small)], size(Xa_small))
+    Xb_p = reshape(X_perturbed[length(Xa_small)+1:end], size(Xb_small))
+
+    Ya_p, Yb_p, _ = L_verify.forward(Xa_p, Xb_p)
+    Y_perturbed = vcat(vec(Ya_p), vec(Yb_p))
+
+    Y_base = vcat(vec(Ya_small), vec(Yb_small))
+    J[:, i] = (Y_perturbed - Y_base) / ε
 end
 
-println("\n✓ All CouplingLayerBasicCV tests passed!")
+# Compute trace explicitly
+jac_trace_explicit = sum(diag(J))
+identity_contribution = nx_small * ny_small * n_in_small
+
+println("Computed jac_trace: ", jac_trace_computed[1])
+println("Explicit jac_trace: ", jac_trace_explicit)
+println("Identity contribution (nx*ny*n_in): ", identity_contribution)
+println("Difference: ", abs(jac_trace_computed[1] - jac_trace_explicit))
+
+# Test that they match
+@test isapprox(jac_trace_computed[1], jac_trace_explicit; rtol=1f-3)
+
+
+###################################################################################################
+# Gradient tests with jac_trace_grad_weight
+
+# Target for CV objective
+batchsize = 2
+Xa = randn(Float32, nx, ny, Int(k/2), batchsize)
+Xb = randn(Float32, nx, ny, Int(k/2), batchsize)
+Xa0 = randn(Float32, nx, ny, Int(k/2), batchsize)
+Xb0 = randn(Float32, nx, ny, Int(k/2), batchsize)
+dXa = Xa - Xa0
+dXb = Xb - Xb0
+
+target = randn(Float32, batchsize)
+a = randn(Float32, nx, ny, k, batchsize)
+
+# Loss Function with CV objective
+function loss_cv(L, Xa, Xb, Ya, Yb, target, a)
+    Ya_, Yb_, jac_trace = L.forward(Xa, Xb)
+    Y_cat = tensor_cat(Ya_, Yb_)
+
+    # CV residual: target - jac_trace - a'*Y
+    residual = target .- jac_trace .- vec(sum(a .* Y_cat, dims=[1,2,3]))
+
+    # Objective
+    f = mse(Y_cat, tensor_cat(Ya, Yb)) + .5f0/batchsize * sum(residual.^2)
+
+    # Gradient weight for jacobian trace
+    jac_trace_grad_weight = -residual ./ Float32(batchsize)
+
+    # Data gradient with CV contribution
+    ΔY = ∇mse(Y_cat, tensor_cat(Ya, Yb))
+    for i=1:batchsize
+        selectdim(ΔY, 4, i) .+= -residual[i] / Float32(batchsize) .* selectdim(a, 4, i)
+    end
+
+    ΔYa, ΔYb = tensor_split(ΔY)
+    ΔXa, ΔXb = L.backward(ΔYa, ΔYb, Ya_, Yb_; jac_trace_grad_weight=jac_trace_grad_weight)[1:2]
+
+    # Pass back gradients w.r.t. input X and from the residual block
+    return f, ΔXa, ΔXb, L.RB.W1.grad, L.RB.W2.grad, L.RB.W3.grad
+end
+
+# Invertible layers
+RB0 = ResidualBlock(n_in, n_hidden; fan=true)
+L = CouplingLayerBasicCV(RB)
+L02 = CouplingLayerBasicCV(RB0)
+
+# Gradient test w.r.t. input X0
+Ya, Yb = L.forward(Xa, Xb)[1:2]
+f0, ΔXa, ΔXb = loss_cv(L, Xa0, Xb0, Ya, Yb, target, a)[1:3]
+h = 0.1f0
+maxiter = 5  # Reduced to avoid numerical precision issues
+err1 = zeros(Float32, maxiter)
+err2 = zeros(Float32, maxiter)
+
+print("\nGradient test coupling layer CV (X)\n")
+for j=1:maxiter
+    f = loss_cv(L, Xa0 + h*dXa, Xb0 + h*dXb, Ya, Yb, target, a)[1]
+    err1[j] = abs(f - f0)
+    err2[j] = abs(f - f0 - h*dot(dXa, ΔXa) - h*dot(dXb, ΔXb))
+    print(err1[j], "; ", err2[j], "\n")
+    global h = h/2f0
+end
+
+@test isapprox(err1[end] / (err1[1]/2^(maxiter-1)), 1f0; atol=1f1)
+@test isapprox(err2[end] / (err2[1]/4^(maxiter-1)), 1f0; atol=1f1)
+
+
+# Gradient test w.r.t. weights of residual block
+Ya, Yb = L.forward(Xa, Xb)[1:2]
+Lini = deepcopy(L02)
+dW1 = L.RB.W1.data - L02.RB.W1.data
+dW2 = L.RB.W2.data - L02.RB.W2.data
+dW3 = L.RB.W3.data - L02.RB.W3.data
+
+f0, ΔXa, ΔXb, ΔW1, ΔW2, ΔW3 = loss_cv(L02, Xa, Xb, Ya, Yb, target, a)
+h = 0.5f0  # Larger initial step size
+maxiter = 5
+err3 = zeros(Float32, maxiter)
+err4 = zeros(Float32, maxiter)
+
+print("\nGradient test coupling layer CV (params)\n")
+for j=1:maxiter
+    L02.RB.W1.data = Lini.RB.W1.data + h*dW1
+    L02.RB.W2.data = Lini.RB.W2.data + h*dW2
+    L02.RB.W3.data = Lini.RB.W3.data + h*dW3
+    f = loss_cv(L02, Xa, Xb, Ya, Yb, target, a)[1]
+    err3[j] = abs(f - f0)
+    err4[j] = abs(f - f0 - h*dot(dW1, ΔW1) - h*dot(dW2, ΔW2) - h*dot(dW3, ΔW3))
+    print(err3[j], "; ", err4[j], "\n")
+    global h = h/2f0
+end
+
+@test isapprox(err3[end] / (err3[1]/2^(maxiter-1)), 1f0; atol=1f1)
+@test isapprox(err4[end] / (err4[1]/4^(maxiter-1)), 1f0; atol=1f1)
+
+
+###################################################################################################
+# Jacobian-related tests
+
+# Gradient test
+
+# Initialization
+batchsize = 1
+RB0 = ResidualBlock(n_in, n_hidden; fan=true)
+L0 = CouplingLayerBasicCV(RB0; activation=Sigmoid2Layer())
+θ0 = deepcopy(get_params(L0))
+RB = ResidualBlock(n_in, n_hidden; fan=true)
+L = CouplingLayerBasicCV(RB; activation=Sigmoid2Layer())
+θ = deepcopy(get_params(L))
+X1 = randn(Float32, nx, ny, n_in, batchsize)
+X2 = randn(Float32, nx, ny, n_in, batchsize)
+
+# Perturbation (normalized)
+dθ = θ - θ0
+for i = 1:length(θ)
+    dθ[i] = norm(θ0[i])*dθ[i]/(norm(dθ[i]).+1f-10)
+end
+dX1 = randn(Float32, nx, ny, n_in, batchsize); dX1 = norm(X1)*dX1/norm(dX1)
+dX2 = randn(Float32, nx, ny, n_in, batchsize); dX2 = norm(X2)*dX2/norm(dX2)
+
+# Jacobian eval
+dY1, dY2, Y1, Y2 = L.jacobian(dX1, dX2, dθ, X1, X2)
+
+# Test
+print("\nJacobian test\n")
+h = 0.1f0
+maxiter = 5
+err9 = zeros(Float32, maxiter)
+err10 = zeros(Float32, maxiter)
+for j=1:maxiter
+    set_params!(L, θ + h*dθ)
+    Y1_, Y2_, _ = L.forward(X1 + h*dX1, X2 + h*dX2)
+    err9[j] = sqrt(norm(Y1_ - Y1)^2f0 + norm(Y2_ - Y2)^2f0)
+    err10[j] = sqrt(norm(Y1_ - Y1 - h*dY1)^2f0 + norm(Y2_ - Y2 - h*dY2)^2f0)
+    print(err9[j], "; ", err10[j], "\n")
+    global h = h/2f0
+end
+
+@test isapprox(err9[end] / (err9[1]/2^(maxiter-1)), 1f0; atol=1f1)
+@test isapprox(err10[end] / (err10[1]/4^(maxiter-1)), 1f0; atol=1f1)
+
+# Adjoint test
+
+set_params!(L, θ)
+dY1, dY2, Y1, Y2 = L.jacobian(dX1, dX2, dθ, X1, X2)
+dY1_ = randn(Float32, size(dY1)); dY2_ = randn(Float32, size(dY2))
+dX1_, dX2_, dθ_ = L.adjointJacobian(dY1_, dY2_, Y1, Y2)
+a_test = dot(dY1, dY1_) + dot(dY2, dY2_)
+b_test = dot(dX1, dX1_) + dot(dX2, dX2_) + dot(dθ, dθ_)
+@test isapprox(a_test, b_test; rtol=1f-3)

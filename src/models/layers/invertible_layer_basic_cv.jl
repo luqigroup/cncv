@@ -84,12 +84,19 @@ end
 CouplingLayerBasicCV3D(args...;kw...) = CouplingLayerBasicCV(args...; kw..., ndims=3)
 
 ## Jacobian trace computation
-# For coupling layer: jac_trace = sum(S)
-coupling_jac_trace_forward(S) = dropdims(sum(S; dims=tuple(1:ndims(S)-1...)); dims=tuple(1:ndims(S)-1...))
+# For coupling layer: jac_trace = trace(I) + sum(S)
+# where trace(I) = nx * ny * n_channels (from the identity part Y1 = X1)
+function coupling_jac_trace_forward(X1, S)
+    # Sum over spatial and channel dimensions for each batch element
+    trace_S = dropdims(sum(S; dims=tuple(1:ndims(S)-1...)); dims=tuple(1:ndims(S)-1...))
+    # Add identity contribution from X1: nx * ny * n_channels (size of X1 which passes through unchanged)
+    identity_contribution = prod(size(X1)[1:end-1])  # nx * ny * n_channels of X1
+    return trace_S .+ Float32(identity_contribution)
+end
 
 ## Jacobian trace gradient computation
 # Gradient of jac_trace w.r.t. S: d(sum(S))/dS = 1 for all elements
-coupling_jac_trace_backward(S) = ones(eltype(S), size(S)) ./ size(S)[end]
+coupling_jac_trace_backward(S) = ones(eltype(S), size(S))
 
 # 2D/3D Forward pass: Input X, Output Y
 function forward(X1::AbstractArray{T, N}, X2::AbstractArray{T, N}, L::CouplingLayerBasicCV; save::Bool=false) where {T, N}
@@ -100,7 +107,7 @@ function forward(X1::AbstractArray{T, N}, X2::AbstractArray{T, N}, L::CouplingLa
     Y2 = S.*X2 + logS_T2
 
     # Compute jacobian trace per batch element
-    jac_trace_batch = coupling_jac_trace_forward(S)
+    jac_trace_batch = coupling_jac_trace_forward(X1, S)
 
     save ? (return X1, Y2, jac_trace_batch, logS_T1, S) : (return X1, Y2, jac_trace_batch)
 end
@@ -114,7 +121,7 @@ function inverse(Y1::AbstractArray{T, N}, Y2::AbstractArray{T, N}, L::CouplingLa
     X2 = (Y2 - logS_T2) ./ (S .+ eps(T)) # add epsilon to avoid division by 0
 
     # Compute jacobian trace per batch element
-    jac_trace_batch = coupling_jac_trace_forward(S)
+    jac_trace_batch = coupling_jac_trace_forward(Y1, S)
 
     save == true ? (return Y1, X2, jac_trace_batch, logS_T1, S) : (return Y1, X2, jac_trace_batch)
 end
