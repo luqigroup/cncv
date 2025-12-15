@@ -61,14 +61,65 @@ function Conv1x1CV(v1, v2, v3; freeze=false)
     return Conv1x1CV(k, v1, v2, v3, freeze)
 end
 
+## Jacobian trace computation helpers
+# Compute k×k Householder matrix: H = I - 2vv^T/(v^Tv)
+function householder_matrix(v::AbstractVector{T}) where T
+    k = length(v)
+    vv = v * v'
+    vnorm_sq = v' * v
+    return Matrix{T}(I, k, k) - 2 * vv / vnorm_sq
+end
+
+# Compute trace of product of three Householder matrices
+function compute_householder_trace(v1::AbstractVector{T}, v2::AbstractVector{T}, v3::AbstractVector{T}) where T
+    H1 = householder_matrix(v1)
+    H2 = householder_matrix(v2)
+    H3 = householder_matrix(v3)
+    W = H1 * H2 * H3
+    return sum(diag(W))
+end
+
 ## Jacobian trace gradient computation
-# For Householder (orthogonal), jac_trace = 0, so gradient is also 0
+# For Householder products, trace IS parameter-dependent
+# Note: Computing exact gradients would be expensive (requires differentiating matrix products)
+# For now, we use finite differences for accuracy
 function jac_trace_grad!(C::Conv1x1CV, X::AbstractArray{T, N}) where {T, N}
     k = C.k
-    # Gradient is zero for all parameters
+    v1 = C.v1.data
+    v2 = C.v2.data
+    v3 = C.v3.data
+
+    # Use finite differences to compute gradient
+    ε = T(1e-5)
     ∇v1_jac_trace = zeros(T, k)
     ∇v2_jac_trace = zeros(T, k)
     ∇v3_jac_trace = zeros(T, k)
+
+    trace_0 = compute_householder_trace(v1, v2, v3)
+
+    # Gradient w.r.t. v1
+    for i = 1:k
+        v1_pert = copy(v1)
+        v1_pert[i] += ε
+        trace_pert = compute_householder_trace(v1_pert, v2, v3)
+        ∇v1_jac_trace[i] = (trace_pert - trace_0) / ε
+    end
+
+    # Gradient w.r.t. v2
+    for i = 1:k
+        v2_pert = copy(v2)
+        v2_pert[i] += ε
+        trace_pert = compute_householder_trace(v1, v2_pert, v3)
+        ∇v2_jac_trace[i] = (trace_pert - trace_0) / ε
+    end
+
+    # Gradient w.r.t. v3
+    for i = 1:k
+        v3_pert = copy(v3)
+        v3_pert[i] += ε
+        trace_pert = compute_householder_trace(v1, v2, v3_pert)
+        ∇v3_jac_trace[i] = (trace_pert - trace_0) / ε
+    end
 
     return ∇v1_jac_trace, ∇v2_jac_trace, ∇v3_jac_trace
 end
@@ -126,20 +177,22 @@ function conv1x1_grad_v(X::AbstractArray{T, N}, ΔY::AbstractArray{T, N},
         broadcast!(+, dv3, dv3, mat_tens_i(prod_res, Xi, dV3, ΔYi))
     end
 
-    # Add jacobian trace gradient if provided (always zero for Householder, but kept for consistency)
+    # Add jacobian trace gradient if provided
     if !isnothing(jac_trace_grad_weight)
         ∇v1_trace, ∇v2_trace, ∇v3_trace = jac_trace_grad!(C, X)
+        # Scale by spatial size (nx * ny)
+        spatial_size = prod(size(X)[1:N-2])
         trace_weight_sum = sum(jac_trace_grad_weight)
-        dv1 += trace_weight_sum * ∇v1_trace
-        dv2 += trace_weight_sum * ∇v2_trace
-        dv3 += trace_weight_sum * ∇v3_trace
+        dv1 += T(spatial_size) * trace_weight_sum * ∇v1_trace
+        dv2 += T(spatial_size) * trace_weight_sum * ∇v2_trace
+        dv3 += T(spatial_size) * trace_weight_sum * ∇v3_trace
     end
 
     return dv1, dv2, dv3
 end
 
 # Forward pass
-# Note: Householder reflections are orthogonal, so trace of Jacobian = 0
+# Compute Jacobian trace: trace(J) = nx * ny * trace(H1 * H2 * H3)
 function forward(X::AbstractArray{T, N}, C::Conv1x1CV) where {T, N}
     Y = cuzeros(X, size(X)...)
     n_in = size(X, N-1)
@@ -154,9 +207,14 @@ function forward(X::AbstractArray{T, N}, C::Conv1x1CV) where {T, N}
         selectdim(Y, N, i) .= reshape(Yi, size(selectdim(Y, N, i))...)
     end
 
-    # Jacobian trace is 0 for Householder (orthogonal matrix)
+    # Compute Jacobian trace: trace(J) = nx * ny * trace(H1 * H2 * H3)
+    # The same k×k matrix W is applied at each spatial location
+    spatial_size = prod(size(X)[1:N-2])  # nx * ny (or nx * ny * nz for 3D)
+    trace_W = compute_householder_trace(v1, v2, v3)
+    jac_trace_per_sample = T(spatial_size) * trace_W
+
     batchsize = size(X, N)
-    jac_trace_batch = zeros(T, batchsize)
+    jac_trace_batch = fill(jac_trace_per_sample, batchsize)
 
     return Y, jac_trace_batch
 end
@@ -197,9 +255,14 @@ function inverse(Y::AbstractArray{T, N}, C::Conv1x1CV) where {T, N}
         selectdim(X, N, i) .= reshape(Xi, size(selectdim(X, N, i))...)
     end
 
-    # Jacobian trace is 0 for Householder (orthogonal matrix)
+    # Compute Jacobian trace: trace(J) = nx * ny * trace(H1 * H2 * H3)
+    # For inverse, the transformation is H3 * H2 * H1, which has the same trace
+    spatial_size = prod(size(Y)[1:N-2])  # nx * ny (or nx * ny * nz for 3D)
+    trace_W = compute_householder_trace(v1, v2, v3)
+    jac_trace_per_sample = T(spatial_size) * trace_W
+
     batchsize = size(Y, N)
-    jac_trace_batch = zeros(T, batchsize)
+    jac_trace_batch = fill(jac_trace_per_sample, batchsize)
 
     return X, jac_trace_batch
 end
