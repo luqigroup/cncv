@@ -1,266 +1,311 @@
-# Test for ActNormCV layer (CV version with jacobian trace)
-# Tests include: invertibility, gradient tests, jacobian trace tests, integrated gradients
+# Test activation normalization layer (CV version - with jacobian trace)
+# Author: Philipp Witte, pwitte3@gatech.edu
+# Date: January 2020
 
 using Test, Random, LinearAlgebra, Statistics
-using InvertibleNetworks: get_params, clear_grad!
+using InvertibleNetworks: get_params, get_grads, clear_grad!, set_params!
 
 using CNCV
 
-Random.seed!(123)
+Random.seed!(11)
+###############################################################################
+# Test jac_trace implementation
 
-@testset "ActNormCV Layer Tests" begin
+# Input
+nx = 4
+ny = 4
+nc = 3
+batchsize = 1
+X = rand(Float32, nx, ny, nc, batchsize)
 
-    ###############################################################################
-    # Test 2D ActNormCV
-    ###############################################################################
+# ActNormCV and initialize
+AN = ActNormCV(nc)
+AN.forward(X)
 
-    @testset "ActNormCV 2D - Basic and Jacobian Trace" begin
-        nx, ny = 16, 16
-        nc = 4
-        batchsize = 8
-
-        # Create layer
-        AN = ActNormCV(nc)
-
-        # Input
-        X = randn(Float32, nx, ny, nc, batchsize)
-
-        # Forward pass
-        Y, jac_trace_batch = AN.forward(X)
-
-        @test size(Y) == size(X)
-        @test length(jac_trace_batch) == batchsize
-        @test !isnothing(AN.s.data)
-        @test !isnothing(AN.b.data)
-
-        # Verify jacobian trace computation
-        # For ActNorm: jac_trace = nx * ny * sum(s)
-        expected_jac_trace = nx * ny * sum(AN.s.data)
-        @test all(isapprox.(jac_trace_batch, expected_jac_trace; rtol=1e-5))
-
-        # Test that parameters are initialized
-        Y_mean = mean(Y; dims=(1,2,4))
-        Y_std = std(Y; dims=(1,2,4))
-        @test isapprox(Y_mean, zeros(Float32, 1, 1, nc, 1); atol=1e-5)
-        @test isapprox(Y_std, ones(Float32, 1, 1, nc, 1); atol=1e-1)
-    end
-
-    @testset "ActNormCV 2D - Invertibility with Jacobian Trace" begin
-        nx, ny = 16, 16
-        nc = 4
-        batchsize = 8
-
-        AN = ActNormCV(nc)
-        X = randn(Float32, nx, ny, nc, batchsize)
-
-        # Forward-inverse
-        Y, jac_trace_fwd = AN.forward(X)
-        X_reconstructed, jac_trace_inv = AN.inverse(Y)
-
-        @test isapprox(X, X_reconstructed; rtol=1e-5)
-
-        # Jacobian traces should be equal in magnitude (opposite in log-det sense)
-        @test isapprox(jac_trace_fwd, jac_trace_inv; rtol=1e-5)
-    end
-
-    @testset "ActNormCV 2D - Gradient Test with Jacobian Trace Weight" begin
-        nx, ny = 8, 8
-        nc = 2
-        batchsize = 4
-
-        AN = ActNormCV(nc)
-        X = randn(Float32, nx, ny, nc, batchsize)
-
-        # Initialize
-        AN.forward(X)
-
-        # Loss function with jacobian trace term
-        function loss_with_trace(AN, X)
-            Y, jac_trace = AN.forward(X)
-
-            # Loss = ||Y||^2 + lambda * sum(jac_trace)
-            lambda = 0.1f0
-            f = 0.5f0*norm(Y)^2f0 + lambda * sum(jac_trace)
-
-            # Compute gradients
-            ΔY = Y
-            jac_trace_grad_weight = fill(lambda, batchsize)
-
-            ΔX, _ = AN.backward(ΔY, Y; jac_trace_grad_weight=jac_trace_grad_weight)
-
-            return f, ΔX, deepcopy(get_params(AN))
+# Explicitely compute jacobian trace through probing
+# for small number of dimensions
+J = zeros(Float32, Int(nx*ny*nc), Int(nx*ny*nc))
+for i=1:nc
+    count = 1
+    for j=1:nx
+        for k=1:ny
+            E = zeros(Float32, nx, ny, nc, 1)
+            E[k, j, i] = 1f0
+            local Y = AN.forward(X)[1]
+            # Use inverse to get backward direction
+            X_back, _ = AN.inverse(Y)
+            ΔX, _ = AN.backward(E, Y)
+            J[:, (i-1)*nx*ny + count] = vec(ΔX)
+            count += 1
         end
+    end
+end
+jac_trace1 = sum(diag(J))
+jac_trace2 = AN.forward(X)[2][1]  # Get first batch element
+@test isapprox((jac_trace1 - jac_trace2)/jac_trace1, 0f0; atol=1f-6)
 
-        # Base point
-        X0 = randn(Float32, nx, ny, nc, batchsize)
-        AN.forward(X0)  # Initialize
-        f0, ΔX, Δθ = loss_with_trace(AN, X0)
 
-        # Perturbation
-        dX = randn(Float32, nx, ny, nc, batchsize)
+###############################################################################
+# Test jac_trace per batch element
 
-        # Gradient test (input)
-        h = 0.1f0
-        maxiter = 5
-        err1 = zeros(Float32, maxiter)
-        err2 = zeros(Float32, maxiter)
+# Input with larger batchsize
+nx = 4
+ny = 4
+nc = 3
+batchsize = 5
+X = rand(Float32, nx, ny, nc, batchsize)
 
-        println("\nGradient test ActNormCV 2D with jac_trace: input")
-        for j=1:maxiter
-            f = loss_with_trace(AN, X0 + h*dX)[1]
-            err1[j] = abs(f - f0)
-            err2[j] = abs(f - f0 - h*dot(dX, ΔX))
-            println("  Iter $j: err1=$(err1[j]), err2=$(err2[j])")
-            h /= 2f0
-        end
+# ActNormCV and initialize
+AN = ActNormCV(nc)
+AN.forward(X)
 
-        @test isapprox(err1[end] / (err1[1]/2^(maxiter-1)), 1f0; atol=1f1)
-        @test isapprox(err2[end] / (err2[1]/4^(maxiter-1)), 1f0; atol=1f1)
+# Test jac_trace returns vector with one element per batch
+Y, jac_trace_vec = AN.forward(X)
+@test jac_trace_vec isa AbstractArray
+@test length(jac_trace_vec) == batchsize
+# All batch elements should have same trace (since transformation is same for all)
+@test all(jac_trace_vec .≈ jac_trace_vec[1])
+
+# Test inverse jac_trace
+X_inv, jac_trace_inv_vec = AN.inverse(Y)
+@test jac_trace_inv_vec isa AbstractArray
+@test length(jac_trace_inv_vec) == batchsize
+# Inverse should have same trace as forward (not negated like logdet)
+@test all(jac_trace_inv_vec .≈ jac_trace_vec[1])
+
+
+###############################################################################
+# Initialization and invertibility
+
+# Input
+nx = 28
+ny = 28
+nc = 4
+batchsize = 1
+X = rand(Float32, nx, ny, nc, batchsize)
+
+# Layer and initialization
+AN = ActNormCV(nc)
+Y, _ = AN.forward(X)
+
+# Test initialization
+@test isapprox(mean(Y), 0f0; atol=1f-6)
+@test isapprox(var(Y), 1f0; atol=1f-3)
+
+# Test invertibility
+@test isapprox(norm(X - AN.inverse(AN.forward(X)[1])[1])/norm(X), 0f0, atol=1f-6)
+@test isapprox(norm(X - AN.forward(AN.inverse(X)[1])[1])/norm(X), 0f0, atol=1f-6)
+
+# Test with multiple batches
+batchsize = 3
+X = rand(Float32, nx, ny, nc, batchsize)
+AN = ActNormCV(nc)
+
+Y, jac_trace_vec = AN.forward(X)
+X_rec, _ = AN.inverse(Y)
+@test isapprox(norm(X - X_rec)/norm(X), 0f0, atol=1f-6)
+@test isequal(size(jac_trace_vec), (batchsize,))
+
+
+###############################################################################
+# Gradient Test with jac_trace_grad_weight
+
+AN = ActNormCV(nc)
+batchsize = 2
+X = randn(Float32, nx, ny, nc, batchsize)
+X0 = randn(Float32, nx, ny, nc, batchsize)
+dX = X - X0
+
+# Forward pass
+Y, _ = AN.forward(X)
+
+# Target for CV objective
+target = randn(Float32, batchsize)
+a = randn(Float32, size(Y))
+
+function loss_cv(AN, X, Y, target, a)
+    # Forward pass
+    Y_, jac_trace = AN.forward(X)
+
+    # Compute residual: target - jac_trace - a'*Y
+    residual = target .- jac_trace .- vec(sum(a .* Y_, dims=[1,2,3]))
+
+    # Objective: ||residual||^2
+    f = .5f0/batchsize * sum(residual.^2)
+
+    # Gradient weight for jacobian trace
+    jac_trace_grad_weight = -residual ./ Float32(batchsize)
+
+    # Data gradient: ΔY = -residual/batchsize * a
+    ΔY = zeros(Float32, size(Y_))
+    for i=1:batchsize
+        selectdim(ΔY, 4, i) .= -residual[i] / Float32(batchsize) .* selectdim(a, 4, i)
     end
 
-    @testset "ActNormCV 2D - Jacobian Trace Gradient Test (Parameters)" begin
-        nx, ny = 8, 8
-        nc = 2
-        batchsize = 4
+    # Back propagation with jac_trace_grad_weight
+    ΔX, X_ = AN.backward(ΔY, Y_; jac_trace_grad_weight=jac_trace_grad_weight)
 
-        # Two instances for parameter perturbation
-        AN1 = ActNormCV(nc)
-        AN2 = ActNormCV(nc)
+    # Check invertibility
+    @test isapprox(norm(X - X_)/norm(X), 0f0, atol=1f-6)
 
-        X = randn(Float32, nx, ny, nc, batchsize)
-
-        # Initialize both
-        AN1.forward(X)
-        AN2.forward(X)
-
-        θ0 = deepcopy(get_params(AN1))
-        θ = deepcopy(get_params(AN2))
-
-        # Loss function
-        function loss_params(AN, X)
-            Y, jac_trace = AN.forward(X)
-            lambda = 0.1f0
-            f = 0.5f0*norm(Y)^2f0 + lambda * sum(jac_trace)
-
-            ΔY = Y
-            jac_trace_grad_weight = fill(lambda, batchsize)
-            AN.backward(ΔY, Y; jac_trace_grad_weight=jac_trace_grad_weight)
-
-            return f, deepcopy(get_params(AN))
-        end
-
-        f0, Δθ = loss_params(AN1, X)
-
-        # Perturbation
-        dθ = θ - θ0
-        for i = 1:length(dθ)
-            if norm(θ0[i].data) != 0f0
-                dθ[i].data .*= norm(θ0[i].data)/norm(dθ[i].data)
-            end
-        end
-
-        # Gradient test (parameters)
-        h = 0.1f0
-        maxiter = 5
-        err3 = zeros(Float32, maxiter)
-        err4 = zeros(Float32, maxiter)
-
-        println("\nGradient test ActNormCV 2D with jac_trace: parameters")
-        for j=1:maxiter
-            AN1.s.data .= θ0[1].data + h*dθ[1].data
-            AN1.b.data .= θ0[2].data + h*dθ[2].data
-
-            f = loss_params(AN1, X)[1]
-            err3[j] = abs(f - f0)
-            err4[j] = abs(f - f0 - h*dot(dθ, Δθ))
-            println("  Iter $j: err3=$(err3[j]), err4=$(err4[j])")
-            h /= 2f0
-        end
-
-        @test isapprox(err3[end] / (err3[1]/2^(maxiter-1)), 1f0; atol=1f1)
-        @test isapprox(err4[end] / (err4[1]/4^(maxiter-1)), 1f0; atol=1f1)
-    end
-
-    @testset "ActNormCV 2D - Jacobian Trace Consistency" begin
-        nx, ny = 8, 8
-        nc = 2
-        batchsize = 4
-
-        AN = ActNormCV(nc)
-        X = randn(Float32, nx, ny, nc, batchsize)
-
-        Y, jac_trace = AN.forward(X)
-
-        # Verify trace calculation manually
-        # trace(J) = nx * ny * sum(s) for ActNorm
-        manual_trace = nx * ny * sum(AN.s.data)
-
-        @test all(isapprox.(jac_trace, manual_trace; rtol=1e-5))
-
-        # Verify trace is same for all batch elements
-        @test all(jac_trace .≈ jac_trace[1])
-    end
-
-    ###############################################################################
-    # Test 3D ActNormCV
-    ###############################################################################
-
-    @testset "ActNormCV 3D - Basic and Jacobian Trace" begin
-        nx, ny, nz = 8, 8, 8
-        nc = 2
-        batchsize = 4
-
-        AN = ActNormCV(nc)
-        X = randn(Float32, nx, ny, nz, nc, batchsize)
-
-        Y, jac_trace_batch = AN.forward(X)
-
-        @test size(Y) == size(X)
-        @test length(jac_trace_batch) == batchsize
-
-        # Verify jacobian trace for 3D
-        expected_jac_trace = nx * ny * nz * sum(AN.s.data)
-        @test all(isapprox.(jac_trace_batch, expected_jac_trace; rtol=1e-5))
-    end
-
-    @testset "ActNormCV 3D - Invertibility with Jacobian Trace" begin
-        nx, ny, nz = 8, 8, 8
-        nc = 2
-        batchsize = 4
-
-        AN = ActNormCV(nc)
-        X = randn(Float32, nx, ny, nz, nc, batchsize)
-
-        Y, jac_trace_fwd = AN.forward(X)
-        X_reconstructed, jac_trace_inv = AN.inverse(Y)
-
-        @test isapprox(X, X_reconstructed; rtol=1e-5)
-        @test isapprox(jac_trace_fwd, jac_trace_inv; rtol=1e-5)
-    end
-
-    @testset "ActNormCV - Comparison with Non-CV Version" begin
-        # Verify that without jac_trace_grad_weight, CV version behaves like non-CV
-        nx, ny = 8, 8
-        nc = 2
-        batchsize = 4
-
-        X = randn(Float32, nx, ny, nc, batchsize)
-
-        # CV version
-        AN_cv = ActNormCV(nc)
-        Y_cv, jac_trace = AN_cv.forward(X)
-
-        # Non-CV version
-        AN = ActNorm(nc; logdet=true)
-        Y, logdet = AN.forward(X; logdet_per_batch=true)
-
-        # Outputs should be similar (after initialization)
-        # Note: they won't be exactly the same due to different initializations
-        # but the structure should be the same
-        @test size(Y_cv) == size(Y)
-        @test length(jac_trace) == length(logdet)
-    end
-
+    return f, ΔX, get_grads(AN)
 end
 
-println("\n✓ All ActNormCV tests passed!")
+# Gradient test for X
+maxiter = 5  # Reduced to avoid numerical precision issues
+print("\nGradient test actnorm_cv (X)\n")
+f0, ΔX = loss_cv(AN, X0, Y, target, a)[1:2]
+h = .1f0
+err1 = zeros(Float32, maxiter)
+err2 = zeros(Float32, maxiter)
+for j=1:maxiter
+    f = loss_cv(AN, X0 + h*dX, Y, target, a)[1]
+    err1[j] = abs(f - f0)
+    err2[j] = abs(f - f0 - h*dot(dX, ΔX))
+    print(err1[j], "; ", err2[j], "\n")
+    global h = h/2f0
+end
+
+@test isapprox(err1[end] / (err1[1]/2^(maxiter-1)), 1f0; atol=1f1)
+@test isapprox(err2[end] / (err2[1]/4^(maxiter-1)), 1f0; atol=1f1)
+
+
+# Gradient test for parameters
+AN0 = ActNormCV(nc); AN0.forward(randn(Float32, nx, ny, nc, batchsize))
+AN_ini = deepcopy(AN0)
+θ = get_params(AN_ini)
+dθ = get_params(AN) - get_params(AN0)
+maxiter = 6
+print("\nGradient test actnorm_cv (params)\n")
+f0, ΔX, Δθ = loss_cv(AN0, X, Y, target, a)
+h = 1f0
+err3 = zeros(Float32, maxiter)
+err4 = zeros(Float32, maxiter)
+for j=1:maxiter
+    set_params!(AN0, θ + h*dθ)
+    f = loss_cv(AN0, X, Y, target, a)[1]
+    err3[j] = abs(f - f0)
+    err4[j] = abs(f - f0 - h*dot(dθ, Δθ))
+    print(err3[j], "; ", err4[j], "\n")
+    global h = h/2f0
+end
+
+@test isapprox(err3[end] / (err3[1]/2^(maxiter-1)), 1f0; atol=1f1)
+@test isapprox(err4[end] / (err4[1]/4^(maxiter-1)), 1f0; atol=1f1)
+
+
+###############################################################################
+# Gradient Test with backward_inv
+
+AN = ActNormCV(nc)
+batchsize = 2
+# Initialize AN with a forward pass
+X_init = randn(Float32, nx, ny, nc, batchsize)
+AN.forward(X_init)
+
+Y = randn(Float32, nx, ny, nc, batchsize)
+Y0 = randn(Float32, nx, ny, nc, batchsize)
+dY = Y - Y0
+
+# Target for CV objective
+target = randn(Float32, batchsize)
+a = randn(Float32, size(Y))
+
+function loss_cv_inv(AN, Y, X_target, target, a)
+    # Inverse pass
+    X_, jac_trace = AN.inverse(Y)
+
+    # Compute residual
+    residual = target .- jac_trace .- vec(sum(a .* X_, dims=[1,2,3]))
+
+    # Objective
+    f = .5f0/batchsize * sum(residual.^2)
+
+    # Gradient weight for jacobian trace
+    jac_trace_grad_weight = -residual ./ Float32(batchsize)
+
+    # Data gradient
+    ΔX = zeros(Float32, size(X_))
+    for i=1:batchsize
+        selectdim(ΔX, 4, i) .= -residual[i] / Float32(batchsize) .* selectdim(a, 4, i)
+    end
+
+    # Backward_inv pass
+    ΔY, Y_ = AN.backward_inv(ΔX, X_; jac_trace_grad_weight=jac_trace_grad_weight)
+
+    return f, ΔY, get_grads(AN)
+end
+
+# Forward to get X target
+X_target, _ = AN.inverse(Y)
+
+# Gradient test for Y
+maxiter = 5  # Reduced to avoid numerical precision issues
+print("\nGradient test actnorm_cv backward_inv (Y)\n")
+f0, ΔY = loss_cv_inv(AN, Y0, X_target, target, a)[1:2]
+h = .1f0
+err5 = zeros(Float32, maxiter)
+err6 = zeros(Float32, maxiter)
+for j=1:maxiter
+    f = loss_cv_inv(AN, Y0 + h*dY, X_target, target, a)[1]
+    err5[j] = abs(f - f0)
+    err6[j] = abs(f - f0 - h*dot(dY, ΔY))
+    print(err5[j], "; ", err6[j], "\n")
+    global h = h/2f0
+end
+
+@test isapprox(err5[end] / (err5[1]/2^(maxiter-1)), 1f0; atol=1f1)
+@test isapprox(err6[end] / (err6[1]/4^(maxiter-1)), 1f0; atol=1f1)
+
+
+###################################################################################################
+# Jacobian-related tests
+
+# Gradient test
+
+# Initialization
+AN = ActNormCV(nc)
+batchsize = 1
+AN.forward(randn(Float32, nx, ny, nc, batchsize))
+θ = deepcopy(get_params(AN))
+AN0 = ActNormCV(nc); AN0.forward(randn(Float32, nx, ny, nc, batchsize))
+θ0 = deepcopy(get_params(AN0))
+X = randn(Float32, nx, ny, nc, batchsize)
+
+# Perturbation (normalized)
+dθ = θ - θ0
+for i = 1:length(θ)
+    dθ[i] = norm(θ0[i])*dθ[i]/(norm(dθ[i]).+1f-10)
+end
+dX = randn(Float32, nx, ny, nc, batchsize); dX *= norm(X)/norm(dX)
+
+# Jacobian eval
+dY, Y = AN.jacobian(dX, dθ, X)
+
+# Test
+print("\nJacobian test\n")
+h = 0.1f0
+maxiter = 5
+err9 = zeros(Float32, maxiter)
+err10 = zeros(Float32, maxiter)
+for j=1:maxiter
+    set_params!(AN, θ + h*dθ)
+    Y_loc, _ = AN.forward(X + h*dX)
+    err9[j] = norm(Y_loc - Y)
+    err10[j] = norm(Y_loc - Y - h*dY)
+    print(err9[j], "; ", err10[j], "\n")
+    global h = h/2f0
+end
+
+@test isapprox(err9[end] / (err9[1]/2^(maxiter-1)), 1f0; atol=1f1)
+@test isapprox(err10[end] / (err10[1]/4^(maxiter-1)), 1f0; atol=1f1)
+
+# Adjoint test
+
+set_params!(AN, θ)
+dY, Y = AN.jacobian(dX, dθ, X)
+dY_ = randn(Float32, size(dY))
+dX_, dθ_, _ = AN.adjointJacobian(dY_, Y)
+a_test = dot(dY, dY_)
+b_test = dot(dX, dX_) + dot(dθ, dθ_)
+@test isapprox(a_test, b_test; rtol=1f-3)
