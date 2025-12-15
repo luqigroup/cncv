@@ -5,6 +5,7 @@ module CNCV
 
 using DrWatson
 using Flux
+using Flux: Dense, sigmoid
 using JLD2
 using JSON
 using HDF5
@@ -78,6 +79,7 @@ include("./models/conditional_layers/conditional_layer_glow.jl")
 include("./models/conditional_layers/conditional_layer_glow_cv.jl")
 include("./models/conditional_layers/conditional_layer_basic_cv.jl")
 include("./models/conditional_layers/squeeze_conditional_layer_basic_cv.jl")
+include("./models/conditional_layers/dense_conditional_layer_cv.jl")
 
 
 # Invertible network architectures
