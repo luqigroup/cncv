@@ -1,0 +1,14 @@
+{
+    "max_epoch": 200,
+    "depth": 4,
+    "K": 2,
+    "lr": 0.001,
+    "sim_name": "rosenbrock-squeeze-cv",
+    "lr_step": 20,
+    "sigma": 0.4,
+    "batchsize": 128,
+    "n_hidden": 32,
+    "n_samples_test": 10000,
+    "pattern": "column",
+    "epoch": -1
+}

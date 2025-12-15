@@ -30,6 +30,8 @@ using InvertibleNetworks:
     ShuffleLayer,
     tensor_cat,
     tensor_split,
+    squeeze,
+    unsqueeze,
     cuzeros,
     glorot_uniform,
     chain_lr,
@@ -74,6 +76,8 @@ include("./models/layers/invertible_layer_glow.jl")
 include("./models/layers/invertible_layer_glow_cv.jl")
 include("./models/conditional_layers/conditional_layer_glow.jl")
 include("./models/conditional_layers/conditional_layer_glow_cv.jl")
+include("./models/conditional_layers/conditional_layer_basic_cv.jl")
+include("./models/conditional_layers/squeeze_conditional_layer_basic_cv.jl")
 
 
 # Invertible network architectures
