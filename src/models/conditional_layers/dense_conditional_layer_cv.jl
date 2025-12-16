@@ -66,7 +66,8 @@ function DenseConditionalLayerCV(n_in::Int, n_cond::Int, n_hidden::Int, n_layers
     end
 
     # Output layer: n_hidden -> n_out
-    W_out = Parameter(glorot_uniform(n_out, n_hidden))
+    # Initialize output layer to ZEROS so φ starts small
+    W_out = Parameter(zeros(Float32, n_out, n_hidden))
     b_out = Parameter(zeros(Float32, n_out, 1))
 
     return DenseConditionalLayerCV(split_idx, W1, b1, W_hidden, b_hidden, W_out, b_out, activation)

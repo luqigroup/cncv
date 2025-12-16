@@ -6,11 +6,11 @@ using DrWatson
 
 using InvertibleNetworks: get_params, clear_grad!
 using Rosenbrock
+using Statistics
 using Random
 using ProgressMeter
 using Flux
 using LinearAlgebra
-using Zygote
 
 # Random seed
 Random.seed!(19)
@@ -96,30 +96,34 @@ opt = Flux.Optimiser(
 fval = zeros(Float32, num_batches * args["max_epoch"])
 fval_eval = zeros(Float32, args["max_epoch"])
 
-# Helper function: compute unnormalized log posterior and its gradient (the "a" vector)
-# log p(x|y) ∝ log p(y|x) + log p(x)
-#            = -1/(2σ²) ||x-y||² + log p_Rosenbrock(x)
+# Helper function: compute gradient of unnormalized log posterior (score function)
+# ∇ log p(x|y) = ∇ log p(y|x) + ∇ log p(x)
+# where:
+#   ∇ log p(y|x) = -(x-y)/σ² (Gaussian likelihood)
+#   ∇ log p(x) = gradlogpdf from Rosenbrock distribution
 function compute_score_posterior(X::AbstractArray{T,4}, Y::AbstractArray{T,4}, sigma::T) where T
     batchsize = size(X, 4)
+    grad_log_post = zeros(T, size(X))
 
-    # Compute gradient via Zygote
-    function log_posterior_unnorm(x)
-        # Data likelihood term: -1/(2σ²) ||x-y||²
-        likelihood_term = -sum((x .- Y) .^ 2) / (2 * sigma^2)
+    # Gradient of log likelihood: ∇ log p(y|x) = -(x-y)/σ²
+    grad_likelihood = -(X .- Y) ./ (sigma^2)
 
-        # Prior term: log p_Rosenbrock(x)
-        # Extract 2D points from spatial replication (just take first pixel)
-        x_2d = zeros(T, 2, batchsize)
-        for i = 1:batchsize
-            x_2d[:, i] = x[1, 1, :, i]
-        end
-        prior_term = sum(logpdf(RB_dist, x_2d))
-
-        return likelihood_term + prior_term
+    # Gradient of log prior: use gradlogpdf from Rosenbrock
+    # Extract 2D points from spatial replication (just take first pixel)
+    x_2d = zeros(T, 2, batchsize)
+    for i = 1:batchsize
+        x_2d[:, i] = X[1, 1, :, i]
     end
 
-    # Compute gradient
-    grad_log_post = Zygote.gradient(log_posterior_unnorm, X)[1]
+    # gradlogpdf returns 2×batchsize
+    grad_prior_2d = gradlogpdf(RB_dist, x_2d)
+
+    # Replicate gradient across all spatial locations (since X is replicated)
+    for i = 1:batchsize
+        for ix = 1:4, iy = 1:4
+            grad_log_post[ix, iy, :, i] = grad_likelihood[ix, iy, :, i] + grad_prior_2d[:, i]
+        end
+    end
 
     return grad_log_post
 end
@@ -165,9 +169,35 @@ for epoch = 1:args["max_epoch"]
     for (itr, (X, Y)) in enumerate(train_loader)
         Base.flush(Base.stdout)
 
-        # Compute loss and gradients
-        loss, _, _ = loss_cv(CV, X, Y, μ, args["sigma"])
+        batchsize = size(X, 4)
+
+        # Forward pass
+        h_x = dropdims(mean(X, dims=(1,2)), dims=(1,2))  # 2×batchsize
+        phi_X, jac_trace = CV.forward(X, Y)
+        score_term = compute_score_posterior(X, Y, Float32(args["sigma"]))
+        phi_dot_score = dropdims(sum(phi_X .* score_term, dims=(1,2,3)), dims=(1,2,3))
+        g_cv = jac_trace .+ phi_dot_score
+
+        # Loss
+        residual = h_x .- reshape(g_cv .+ μ[1], 1, batchsize)
+        loss = mean(residual .^ 2)
         fval[(epoch-1)*num_batches+itr] = loss
+
+        # Backward pass
+        # ∂L/∂residual = 2 * residual / (2 * batchsize) = residual / batchsize
+        Δresidual = residual ./ Float32(batchsize)
+
+        # ∂residual/∂g_cv = -1 (broadcasted)
+        Δg_cv = -dropdims(sum(Δresidual, dims=1), dims=1)  # batchsize
+
+        # ∂g_cv/∂jac_trace = 1
+        jac_trace_grad_weight = Δg_cv
+
+        # ∂g_cv/∂phi_dot_score = 1, and ∂phi_dot_score/∂phi_X = score_term
+        Δphi_X = score_term .* reshape(Δg_cv, 1, 1, 1, batchsize)
+
+        # Backward through CV network
+        ΔX, _, ΔY = CV.backward(Δphi_X, phi_X, Y; jac_trace_grad_weight=jac_trace_grad_weight)
 
         ProgressMeter.next!(
             p;
@@ -184,10 +214,11 @@ for epoch = 1:args["max_epoch"]
             Flux.update!(opt, param.data, param.grad)
         end
 
-        # Update μ (simple gradient descent)
+        # Update μ manually
         # ∂L/∂μ = -2 * mean(residual)
-        loss_grad = Zygote.gradient(μ_val -> loss_cv(CV, X, Y, μ_val, args["sigma"])[1], μ)[1]
-        μ[1] -= args["lr"] * loss_grad[1]
+        residual_mean = mean(residual)
+        grad_mu = -2 * residual_mean
+        μ[1] -= args["lr"] * grad_mu
 
         clear_grad!(CV)
     end

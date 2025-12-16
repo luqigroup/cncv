@@ -32,6 +32,10 @@ CV = DenseConditionalLayerCV(
     args["n_layers"];
     activation=tanh
 )
+# Scale down initial weights to make φ small initially
+for p in get_params(CV)
+    p.data .*= 0.01f0  # Start with small φ
+end
 CV = CV |> device
 
 # Training data number
@@ -67,7 +71,7 @@ opt = Flux.Optimiser(
 )
 
 # Learnable offset
-μ = [0.1f0] |> device
+μ = [0.0f0] |> device
 
 # Training log keeper
 fval = zeros(Float32, num_batches * args["max_epoch"])
@@ -168,6 +172,7 @@ for epoch = 1:args["max_epoch"]
                 (:Iteration, itr),
                 (:CV_Loss, fval[(epoch-1)*num_batches+itr]),
                 (:CV_Loss_eval, fval_eval[epoch]),
+                (:μ, μ[1])
             ],
         )
 
@@ -178,9 +183,9 @@ for epoch = 1:args["max_epoch"]
 
         # Update μ manually
         # ∂L/∂μ = -2 * mean(residual)
-        # residual_mean = mean(residual)
-        # grad_mu = -2 * residual_mean
-        # μ[1] -= args["lr"] * grad_mu
+        residual_mean = mean(residual)
+        grad_mu = -2 * residual_mean
+        μ[1] -= args["lr"] * grad_mu
 
         clear_grad!(CV)
     end
