@@ -25,12 +25,14 @@ device = cpu
 
 # Define control variate network using DenseConditionalLayerCV
 # This is designed for low-dimensional data (2D Rosenbrock)
+# n_cv=2: output 2 CVs, one for each dimension of h(x) = [x1, x2]
 CV = DenseConditionalLayerCV(
     2,  # n_in: 2D input
     2,  # n_cond: 2D conditioning
     args["n_hidden"],
     args["n_layers"];
-    activation=tanh
+    activation=tanh,
+    n_cv=2  # Vector-valued: 2 CVs (one per component)
 )
 # Scale down initial weights to make φ small initially
 for p in get_params(CV)
@@ -70,8 +72,8 @@ opt = Flux.Optimiser(
     Flux.Adam(args["lr"]),
 )
 
-# Learnable offset
-μ = [0.0f0] |> device
+# Learnable offsets (one per component)
+μ = [0.0f0, 0.0f0] |> device
 
 # Training log keeper
 fval = zeros(Float32, num_batches * args["max_epoch"])
@@ -99,28 +101,41 @@ end
 
 # Loss function for CV training: minimize E[(h(x) - (div(φ) + φ·∇log p) - μ)²]
 # Here h(x) = x (identity, to estimate the mean)
+# With vector CVs: g_k for component k
 function loss_cv(CV, X, Y, μ, sigma)
     batchsize = size(X, 2)
+    n_cv = CV.n_cv
 
     # Quantity of interest: h(x) = x (2×batchsize)
     h_x = X
 
-    # Forward through CV network to get jac_trace (which is div(φ))
-    phi_X, jac_trace = forward(X, Y, CV)
+    # Forward through CV network to get jac_traces and phi_all (n_cv×batchsize)
+    # phi_all contains the n_cv different coupling transformations φ_k
+    jac_traces, phi_all = forward(X, Y, CV)
 
-    # Compute φ(x,y) · ∇log p(x|y)
+    # Compute score: ∇log p(x|y)
     score_term = compute_score_posterior(X, Y, sigma)
 
-    # Inner product: φ · ∇log p (sum over dimensions)
-    phi_dot_score = vec(sum(phi_X .* score_term, dims=1))  # batchsize
+    # Compute control variates: g_k(x,y) = div(φ_k) + φ_k·∇log p
+    g_cv = zeros(Float32, n_cv, batchsize)
+    for k in 1:n_cv
+        # Trace for k-th CV: div(φ_k)
+        trace_k = jac_traces[k, :]
 
-    # Control variate: g(x,y) = div(φ) + φ·∇log p
-    g_cv = jac_trace .+ phi_dot_score  # batchsize
+        # φ_k transformation (n_in × batchsize)
+        phi_k = phi_all[k, :, :]
 
-    # Controlled estimator for each dimension
-    # h_x is 2×batchsize, g_cv is batchsize (scalar CV applied to all dims)
-    # Loss: minimize variance of (h - g - μ)
-    residual = h_x .- reshape(g_cv .+ μ[1], 1, batchsize)  # 2×batchsize
+        # φ_k · ∇log p: inner product (sum over dimensions)
+        phi_dot_score_k = vec(sum(phi_k .* score_term, dims=1))
+
+        # Control variate: g_k = div(φ_k) + φ_k·∇log p
+        g_cv[k, :] = trace_k .+ phi_dot_score_k
+    end
+
+    # Controlled estimator: h_i - g_i - μ_i
+    residual = zeros(Float32, 2, batchsize)
+    residual[1, :] = h_x[1, :] .- g_cv[1, :] .- μ[1]
+    residual[2, :] = h_x[2, :] .- g_cv[2, :] .- μ[2]
 
     loss = mean(residual .^ 2)
 
@@ -139,13 +154,23 @@ for epoch = 1:args["max_epoch"]
 
         # Forward pass
         h_x = X
-        phi_X, jac_trace = forward(X, Y, CV)
+        jac_traces, phi_all = forward(X, Y, CV)  # Get traces and phi_k transformations
         score_term = compute_score_posterior(X, Y, Float32(args["sigma"]))
-        phi_dot_score = vec(sum(phi_X .* score_term, dims=1))
-        g_cv = jac_trace .+ phi_dot_score
 
-        # Loss
-        residual = h_x .- reshape(g_cv .+ μ[1], 1, batchsize)
+        # Compute control variates (vector-valued)
+        n_cv = CV.n_cv
+        g_cv = zeros(Float32, n_cv, batchsize)
+        for k in 1:n_cv
+            trace_k = jac_traces[k, :]
+            phi_k = phi_all[k, :, :]
+            phi_dot_score_k = vec(sum(phi_k .* score_term, dims=1))
+            g_cv[k, :] = trace_k .+ phi_dot_score_k
+        end
+
+        # Loss with component-specific offsets
+        residual = zeros(Float32, 2, batchsize)
+        residual[1, :] = h_x[1, :] .- g_cv[1, :] .- μ[1]
+        residual[2, :] = h_x[2, :] .- g_cv[2, :] .- μ[2]
         loss = mean(residual .^ 2)
         fval[(epoch-1)*num_batches+itr] = loss
 
@@ -153,17 +178,27 @@ for epoch = 1:args["max_epoch"]
         # ∂L/∂residual = 2 * residual / (2 * batchsize) = residual / batchsize
         Δresidual = residual ./ Float32(batchsize)
 
-        # ∂residual/∂g_cv = -1 (broadcasted)
-        Δg_cv = -vec(sum(Δresidual, dims=1))  # batchsize
+        # ∂residual[i]/∂g_cv[i] = -1 for each component i
+        Δg_cv = -Δresidual  # 2×batchsize (n_cv×batch)
 
-        # ∂g_cv/∂jac_trace = 1
-        jac_trace_grad_weight = Δg_cv
+        # Now we need to backprop through: g_cv[k] = trace_k + phi_dot_score_k
+        # where phi_dot_score_k = sum(phi_k .* score_term, dims=1)
 
-        # ∂g_cv/∂phi_dot_score = 1, and ∂phi_dot_score/∂phi_X = score_term
-        Δphi_X = score_term .* reshape(Δg_cv, 1, batchsize)
+        # ∂g_cv[k]/∂trace_k = 1
+        jac_trace_grad_weights = Δg_cv  # n_cv×batchsize
 
-        # Backward through CV network
-        ΔX, _, ΔY = backward(Δphi_X, phi_X, Y, CV; jac_trace_grad_weight=jac_trace_grad_weight)
+        # ∂g_cv[k]/∂phi_dot_score_k = 1
+        # ∂phi_dot_score_k/∂phi_k = score_term
+        Δphi_all = zeros(Float32, n_cv, 2, batchsize)
+        for k in 1:n_cv
+            # Gradient wrt phi_k: ∂phi_dot_score_k/∂phi_k = score_term
+            Δphi_all[k, :, :] = score_term .* reshape(Δg_cv[k, :], 1, batchsize)
+        end
+
+        # Backward through CV network (with both trace and phi gradients)
+        ΔX, _, ΔY = backward(zeros(Float32, size(X)), X, Y, CV;
+                             jac_trace_grad_weights=jac_trace_grad_weights,
+                             phi_grad_weights=Δphi_all)
 
         ProgressMeter.next!(
             p;
@@ -172,7 +207,8 @@ for epoch = 1:args["max_epoch"]
                 (:Iteration, itr),
                 (:CV_Loss, fval[(epoch-1)*num_batches+itr]),
                 (:CV_Loss_eval, fval_eval[epoch]),
-                (:μ, μ[1])
+                (:μ1, μ[1]),
+                (:μ2, μ[2])
             ],
         )
 
@@ -181,11 +217,13 @@ for epoch = 1:args["max_epoch"]
             Flux.update!(opt, param.data, param.grad)
         end
 
-        # Update μ manually
-        # ∂L/∂μ = -2 * mean(residual)
-        residual_mean = mean(residual)
-        grad_mu = -2 * residual_mean
-        μ[1] -= args["lr"] * grad_mu
+        # Update μ manually (component-wise)
+        # ∂L/∂μ_i = -2 * mean(residual[i, :])
+        for i in 1:2
+            residual_mean_i = mean(residual[i, :])
+            grad_mu_i = -2 * residual_mean_i
+            μ[i] -= args["lr"] * grad_mu_i
+        end
 
         clear_grad!(CV)
     end

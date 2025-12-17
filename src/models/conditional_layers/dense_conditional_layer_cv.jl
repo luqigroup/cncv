@@ -4,12 +4,13 @@
 
 export DenseConditionalLayerCV
 
-# Import what we need to extend
-import InvertibleNetworks: Parameter, glorot_uniform, get_params, clear_grad!
+# Import what we need from InvertibleNetworks
+import InvertibleNetworks: FluxBlock, Parameter, get_params, clear_grad!
 import InvertibleNetworks: forward, inverse, backward
+import Flux
 
 """
-    CL = DenseConditionalLayerCV(n_in, n_cond, n_hidden, n_layers=3; activation=tanh)
+    CL = DenseConditionalLayerCV(n_in, n_cond, n_hidden, n_layers=3; activation=tanh, coupling_activation=identity, n_cv=nothing)
 
 Create a dense (MLP-based) conditional coupling layer for control variates.
 Designed for low-dimensional data where spatial structure is not present.
@@ -20,213 +21,277 @@ Designed for low-dimensional data where spatial structure is not present.
 - `n_cond`: number of conditioning dimensions
 - `n_hidden`: number of hidden units in MLP
 - `n_layers`: number of hidden layers (default 3)
-- `activation`: activation function (default tanh)
+- `activation`: activation function for hidden layers (default tanh)
+- `coupling_activation`: activation function for S parameters (default identity). Use identity for unconstrained trace values.
+- `n_cv`: number of control variates to output (default: n_in, one per dimension)
 
 *Output*:
 
-- `CL`: Dense conditional coupling layer
+- `CL`: Dense conditional coupling layer that outputs vector-valued control variates
 
 *Usage:*
 
-- Forward mode: `Y, jac_trace = forward(X, C, CL)` where X is n_in×batch, C is n_cond×batch
-- Inverse mode: `X, jac_trace = inverse(Y, C, CL)`
-- Backward mode: `ΔX, X, ΔC = backward(ΔY, Y, C, CL; jac_trace_grad_weight=nothing)`
+- Forward mode: `jac_traces, phi_all = forward(X, C, CL)` where X is n_in×batch, C is n_cond×batch
+  Returns jac_traces (n_cv×batch) and phi_all (n_cv×n_in×batch) - transformations for all CVs
+- Inverse mode: `X, jac_traces, phi_all = inverse(Y, C, CL)` (inverse is for internal use only)
+- Backward mode: `ΔX, X, ΔC = backward(ΔY, X, C, CL; jac_trace_grad_weights=nothing, phi_grad_weights=nothing)`
+  jac_trace_grad_weights should be n_cv×batch, phi_grad_weights should be n_cv×n_in×batch
 
 The layer implements a coupling transformation with tractable Jacobian.
+For vector-valued control variates, we output n_cv separate φ functions,
+each giving one control variate via g_k = div(φ_k) + φ_k·∇log p.
 """
-struct DenseConditionalLayerCV
+struct DenseConditionalLayerCV <: NeuralNetLayer
     split_idx::Int  # Where to split input
-    W1::Parameter   # First layer weights
-    b1::Parameter   # First layer bias
-    W_hidden::Vector{Parameter}  # Hidden layer weights
-    b_hidden::Vector{Parameter}  # Hidden layer biases
-    W_out::Parameter  # Output layer weights
-    b_out::Parameter  # Output layer bias
-    activation::Function
+    n_cv::Int       # Number of control variates to output
+    FB::FluxBlock   # Flux block for MLP
+    coupling_activation::Function  # Activation for S (default identity)
 end
 
-function DenseConditionalLayerCV(n_in::Int, n_cond::Int, n_hidden::Int, n_layers::Int=3; activation=tanh)
+@Flux.functor DenseConditionalLayerCV
+
+# Constructor from input dimensions
+function DenseConditionalLayerCV(n_in::Int, n_cond::Int, n_hidden::Int, n_layers::Int=3;
+                                 activation::Function=tanh, coupling_activation::Function=identity,
+                                 n_cv::Union{Nothing,Int}=nothing)
+
     split_idx = div(n_in, 2)
     n_in2 = n_in - split_idx  # Size of X2 (pass-through part)
-    n_out = 2 * split_idx  # Output S and T, each of size split_idx
 
-    # Build MLP: input is [X2; C], output is [S; T]
+    # Default: one CV per input dimension
+    if n_cv === nothing
+        n_cv = n_in
+    end
+
+    # Output: n_cv sets of [S, T], each set is split_idx-dimensional
+    # So total output is n_cv * 2 * split_idx
+    n_out = n_cv * 2 * split_idx
+
+    # Build MLP using Flux: input is [X2; C], output is n_cv sets of [S; T]
     input_dim = n_in2 + n_cond
 
+    # Create layers
+    layers = []
+
     # First layer: input_dim -> n_hidden
-    W1 = Parameter(glorot_uniform(n_hidden, input_dim))
-    b1 = Parameter(zeros(Float32, n_hidden, 1))
+    push!(layers, Flux.Dense(input_dim, n_hidden, activation))
 
     # Hidden layers: n_hidden -> n_hidden
-    W_hidden = Parameter[]
-    b_hidden = Parameter[]
     for i in 2:n_layers
-        push!(W_hidden, Parameter(glorot_uniform(n_hidden, n_hidden)))
-        push!(b_hidden, Parameter(zeros(Float32, n_hidden, 1)))
+        push!(layers, Flux.Dense(n_hidden, n_hidden, activation))
     end
 
-    # Output layer: n_hidden -> n_out
+    # Output layer: n_hidden -> n_out (no activation, we apply coupling_activation separately)
     # Initialize output layer to ZEROS so φ starts small
-    W_out = Parameter(zeros(Float32, n_out, n_hidden))
-    b_out = Parameter(zeros(Float32, n_out, 1))
+    W_out = zeros(Float32, n_out, n_hidden)
+    b_out = zeros(Float32, n_out)
+    push!(layers, Flux.Dense(W_out, b_out))
 
-    return DenseConditionalLayerCV(split_idx, W1, b1, W_hidden, b_hidden, W_out, b_out, activation)
+    # Create Flux Chain
+    model = Flux.Chain(layers...)
+
+    # Wrap in FluxBlock
+    FB = FluxBlock(model)
+
+    return DenseConditionalLayerCV(split_idx, n_cv, FB, coupling_activation)
 end
-
-# Make it Flux-compatible
-Flux.@functor DenseConditionalLayerCV
-
-# Note: get_params and clear_grad! are already imported by the parent CNCV module
-# We're just adding methods for our new type
 
 # Get parameters for training
-get_params(L::DenseConditionalLayerCV) = begin
-    params = Parameter[L.W1, L.b1]
-    append!(params, L.W_hidden)
-    append!(params, L.b_hidden)
-    push!(params, L.W_out)
-    push!(params, L.b_out)
-    return params
-end
+get_params(L::DenseConditionalLayerCV) = get_params(L.FB)
 
 # Clear gradients
-# Extend the clear_grad! function from the parent scope
-clear_grad!(L::DenseConditionalLayerCV) = begin
-    for p in get_params(L)
-        p.grad = nothing
-    end
-end
+clear_grad!(L::DenseConditionalLayerCV) = clear_grad!(L.FB)
 
-# Forward pass: Input X (n_in×batch) and C (n_cond×batch), Output Y and jac_trace
+# Forward pass: Input X (n_in×batch) and C (n_cond×batch), Output jac_traces and phi_all
+# Returns n_cv different φ_k transformations for computing control variates
 function forward(X::AbstractMatrix{T}, C::AbstractMatrix{T}, L::DenseConditionalLayerCV) where T
     n_in, batch_size = size(X)
 
     # Split input
     X1 = X[1:L.split_idx, :]  # First half
-    X2 = X[L.split_idx+1:end, :]  # Second half (pass-through)
-
-    Y2 = copy(X2)
+    X2 = X[L.split_idx+1:end, :]  # Second half
 
     # Concatenate X2 and C
     input = vcat(X2, C)
 
-    # Forward through MLP
-    # First layer
-    hidden = L.W1.data * input .+ L.b1.data
-    hidden = L.activation.(hidden)
+    # Forward through FluxBlock (MLP)
+    # Output is n_cv sets of [S, T], each of size split_idx
+    output = forward(input, L.FB)
 
-    # Hidden layers
-    for i in 1:length(L.W_hidden)
-        hidden = L.W_hidden[i].data * hidden .+ L.b_hidden[i].data
-        hidden = L.activation.(hidden)
+    # Compute n_cv control variates (traces) and transformations
+    jac_traces = zeros(T, L.n_cv, batch_size)
+    phi_all = zeros(T, L.n_cv, n_in, batch_size)  # Store all φ_k transformations
+
+    for k in 1:L.n_cv
+        # Extract S and T for k-th control variate
+        idx_start = (k-1) * 2 * L.split_idx + 1
+        S_raw_k = output[idx_start:idx_start+L.split_idx-1, :]
+        T_k = output[idx_start+L.split_idx:idx_start+2*L.split_idx-1, :]
+
+        # Apply coupling activation
+        S_k = L.coupling_activation.(S_raw_k)
+
+        # Compute φ_k transformation: φ_k = [S_k ⊙ X1 + T_k; X2]
+        Y1_k = S_k .* X1 .+ T_k
+        phi_k = vcat(Y1_k, X2)
+        phi_all[k, :, :] = phi_k
+
+        # Compute trace for k-th CV: trace = sum(S_k) + dim(X2)
+        jac_traces[k, :] = vec(sum(S_k, dims=1)) .+ T(size(X2, 1))
     end
 
-    # Output layer (no activation)
-    output = L.W_out.data * hidden .+ L.b_out.data
-
-    # Split output into S and Tm (translation/shift term)
-    S_raw = output[1:L.split_idx, :]
-    Tm = output[L.split_idx+1:end, :]
-
-    # Apply sigmoid to S to ensure positivity (for stability)
-    S = sigmoid.(S_raw)
-
-    # Compute Y1 = S ⊙ X1 + Tm
-    Y1 = S .* X1 .+ Tm
-
-    # Concatenate Y1 and Y2
-    Y = vcat(Y1, Y2)
-
-    # Compute Jacobian trace
-    # Jacobian is block triangular: [[diag(S), *], [0, I]]
-    # Trace = sum(S) + length(X2)
-    jac_trace = vec(sum(S, dims=1)) .+ Float32(size(X2, 1))
-
-    return Y, jac_trace
+    return jac_traces, phi_all
 end
 
-# Inverse pass: Input Y and C, Output X and jac_trace
-function inverse(Y::AbstractMatrix{T}, C::AbstractMatrix{T}, L::DenseConditionalLayerCV) where T
-    Y1 = Y[1:L.split_idx, :]
-    Y2 = Y[L.split_idx+1:end, :]
+# Inverse pass: For control variates, we don't need true invertibility
+# This function is used in backward() to recompute forward state
+# We treat the input as X and compute the forward pass
+function inverse(Y::AbstractMatrix{T}, C::AbstractMatrix{T}, L::DenseConditionalLayerCV; save=false) where T
+    n_in, batch_size = size(Y)
 
-    X2 = copy(Y2)
+    # For CV layers, inverse is not well-defined (S can be zero with identity activation)
+    # Instead, we just treat Y as X and recompute forward pass
+    X = Y
 
-    # Forward through MLP (same as forward pass)
+    X1 = X[1:L.split_idx, :]
+    X2 = X[L.split_idx+1:end, :]
+
+    # Concatenate X2 and C to get network input
     input = vcat(X2, C)
 
-    hidden = L.W1.data * input .+ L.b1.data
-    hidden = L.activation.(hidden)
+    # Forward through FluxBlock (MLP)
+    output = forward(input, L.FB)
 
-    for i in 1:length(L.W_hidden)
-        hidden = L.W_hidden[i].data * hidden .+ L.b_hidden[i].data
-        hidden = L.activation.(hidden)
+    # Now compute phi_all and jac_traces for all CVs using the recovered X
+    jac_traces = zeros(T, L.n_cv, batch_size)
+    phi_all = zeros(T, L.n_cv, n_in, batch_size)
+    S_all = []
+
+    for k in 1:L.n_cv
+        idx_start = (k-1) * 2 * L.split_idx + 1
+        S_raw_k = output[idx_start:idx_start+L.split_idx-1, :]
+        T_k = output[idx_start+L.split_idx:idx_start+2*L.split_idx-1, :]
+
+        S_k = L.coupling_activation.(S_raw_k)
+        push!(S_all, (S_raw_k, S_k, T_k))
+
+        # Compute φ_k transformation using recovered X1
+        Y1_k = S_k .* X1 .+ T_k
+        phi_k = vcat(Y1_k, X2)
+        phi_all[k, :, :] = phi_k
+
+        jac_traces[k, :] = vec(sum(S_k, dims=1)) .+ T(size(X2, 1))
     end
 
-    output = L.W_out.data * hidden .+ L.b_out.data
-
-    S_raw = output[1:L.split_idx, :]
-    Tm = output[L.split_idx+1:end, :]
-    S = sigmoid.(S_raw)
-
-    # Invert: X1 = (Y1 - Tm) / S
-    X1 = (Y1 .- Tm) ./ (S .+ eps(Float32))
-
-    X = vcat(X1, X2)
-
-    # Jacobian trace (same as forward)
-    jac_trace = vec(sum(S, dims=1)) .+ Float32(size(X2, 1))
-
-    return X, jac_trace
+    if save
+        return X, jac_traces, phi_all, X1, X2, S_all, input
+    else
+        return X, jac_traces, phi_all
+    end
 end
 
-# Backward pass - use Flux automatic differentiation
-function backward(ΔY::AbstractMatrix{T}, Y::AbstractMatrix{T}, C::AbstractMatrix{T}, L::DenseConditionalLayerCV;
-                  jac_trace_grad_weight::Union{Nothing, AbstractVector{T}}=nothing) where T
+# Backward pass - manual implementation for n_cv control variates
+# Note: Second parameter is X (input), not Y (output), despite the signature name
+function backward(ΔY::AbstractMatrix{T}, X::AbstractMatrix{T}, C::AbstractMatrix{T}, L::DenseConditionalLayerCV;
+                  jac_trace_grad_weights::Union{Nothing, AbstractMatrix{T}}=nothing,
+                  phi_grad_weights::Union{Nothing, AbstractArray{T, 3}}=nothing) where T
 
-    # Use Flux.gradient to compute gradients
-    # This is simpler and more reliable than manual backprop
-    params_list = get_params(L)
+    # X is provided directly (no need to recover from Y)
+    # Compute forward state
+    X1 = X[1:L.split_idx, :]
+    X2 = X[L.split_idx+1:end, :]
 
-    # Define loss function for backward pass
-    function compute_output()
-        # Re-compute forward pass
-        # Extract X from Y using inverse
-        X, _ = inverse(Y, C, L)
+    input = vcat(X2, C)
+    output = forward(input, L.FB)
 
-        # Forward pass
-        Y_recon, jac_trace = forward(X, C, L)
-
-        # Compute loss: dot product with ΔY
-        loss = sum(Y_recon .* ΔY)
-
-        # Add jac_trace term if provided
-        if !isnothing(jac_trace_grad_weight)
-            loss += sum(jac_trace .* jac_trace_grad_weight)
-        end
-
-        return loss
+    # Collect S, T for all CVs
+    S_all = []
+    for k in 1:L.n_cv
+        idx_start = (k-1) * 2 * L.split_idx + 1
+        S_raw_k = output[idx_start:idx_start+L.split_idx-1, :]
+        T_k = output[idx_start+L.split_idx:idx_start+2*L.split_idx-1, :]
+        S_k = L.coupling_activation.(S_raw_k)
+        push!(S_all, (S_raw_k, S_k, T_k))
     end
 
-    # Compute gradients using Flux
-    grads = Flux.gradient(compute_output, Flux.params(params_list))
+    batchsize = size(X, 2)
 
-    # Store gradients in parameters
-    for p in params_list
-        if haskey(grads, p.data)
-            if p.grad === nothing
-                p.grad = grads[p.data]
-            else
-                p.grad .+= grads[p.data]
+    # For CVs: Y = X (identity), so ΔX starts with ΔY
+    ΔX = copy(ΔY)
+
+    # Initialize gradient for FluxBlock output
+    output_dim = L.n_cv * 2 * L.split_idx
+    Δoutput = zeros(T, output_dim, batchsize)
+
+    # Backpropagate through each control variate
+    for k in 1:L.n_cv
+        S_raw_k, S_k, T_k = S_all[k]
+
+        ΔS_k = zeros(T, size(S_k))
+        ΔT_k = zeros(T, size(T_k))
+
+        # Gradient from jac_trace if provided
+        if !isnothing(jac_trace_grad_weights)
+            # jac_trace_k = sum(S_k) + const, so ∂jac_trace_k/∂S_k = 1 for all elements
+            for b in 1:batchsize
+                ΔS_k[:, b] .+= jac_trace_grad_weights[k, b]
             end
         end
+
+        # Gradient from phi_k if provided
+        if !isnothing(phi_grad_weights)
+            # phi_k = [S_k .* X1 + T_k; X2]
+            # ∂phi_k[1:split_idx]/∂S_k = X1 (element-wise)
+            # ∂phi_k[1:split_idx]/∂T_k = 1
+            Δphi_k = phi_grad_weights[k, :, :]  # n_in × batchsize
+
+            # Gradient wrt Y1_k part
+            ΔY1_k = Δphi_k[1:L.split_idx, :]
+
+            # ∂(S_k .* X1 + T_k)/∂S_k = X1
+            ΔS_k .+= ΔY1_k .* X1
+
+            # ∂(S_k .* X1 + T_k)/∂T_k = 1
+            ΔT_k .+= ΔY1_k
+
+            # Gradient wrt X2 part (X2 is pass-through in phi_k)
+            ΔX2_from_phi = Δphi_k[L.split_idx+1:end, :]
+            ΔX[L.split_idx+1:end, :] .+= ΔX2_from_phi
+        end
+
+        # Backpropagate through coupling activation
+        if L.coupling_activation == sigmoid
+            ΔS_raw_k = ΔS_k .* S_k .* (1 .- S_k)
+        elseif L.coupling_activation == identity
+            # Identity activation: gradient is 1
+            ΔS_raw_k = ΔS_k
+        else
+            # Generic case using Zygote
+            ΔS_raw_k = zero(S_raw_k)
+            for b in 1:batchsize
+                for i in 1:size(S_raw_k, 1)
+                    grad = Flux.gradient(x -> L.coupling_activation(x), S_raw_k[i, b])[1]
+                    ΔS_raw_k[i, b] = ΔS_k[i, b] * grad
+                end
+            end
+        end
+
+        # Store in Δoutput
+        idx_start = (k-1) * 2 * L.split_idx + 1
+        Δoutput[idx_start:idx_start+L.split_idx-1, :] = ΔS_raw_k
+        Δoutput[idx_start+L.split_idx:idx_start+2*L.split_idx-1, :] = ΔT_k
     end
 
-    # Compute ΔX and ΔC using chain rule
-    # For now, return zero gradients (not used in our training)
-    X, _ = inverse(Y, C, L)
-    ΔX = zeros(T, size(X))
-    ΔC = zeros(T, size(C))
+    # Backpropagate through FluxBlock
+    Δinput = backward(Δoutput, input, L.FB; set_grad=true)
+
+    # Split gradient into ΔX2 and ΔC
+    n_X2 = size(X2, 1)
+    ΔX2_from_mlp = Δinput[1:n_X2, :]
+    ΔC = Δinput[n_X2+1:end, :]
+
+    # Add gradient from X2 part (from MLP)
+    ΔX[L.split_idx+1:end, :] .+= ΔX2_from_mlp
 
     return ΔX, X, ΔC
 end

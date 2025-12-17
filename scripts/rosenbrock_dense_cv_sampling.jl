@@ -116,13 +116,21 @@ end
 # Compute quantities of interest: h(x) = x
 h_x_all = X_test  # 2×test_size
 
-# Forward through CV network
-phi_X, jac_trace = forward(X_test, Y_test, CV)
+# Forward through CV network (vector-valued)
+jac_traces, phi_all = forward(X_test, Y_test, CV)  # Get traces and phi_k transformations
 
-# Compute control variate: g(x,y) = div(φ) + φ·∇log p
+# Compute control variates: g_k(x,y) = div(φ_k) + φ_k·∇log p
 score_term = compute_score_posterior(X_test, Y_test, Float32(args["sigma"]))
-phi_dot_score = vec(sum(phi_X .* score_term, dims=1))
-g_cv_all = jac_trace .+ phi_dot_score  # test_size
+n_cv = CV.n_cv
+g_cv_all = zeros(Float32, n_cv, test_size)
+for k in 1:n_cv
+    trace_k = jac_traces[k, :]
+    # φ_k transformation (n_in × test_size)
+    phi_k = phi_all[k, :, :]
+    # φ_k · ∇log p: inner product (sum over dimensions)
+    phi_dot_score_k = vec(sum(phi_k .* score_term, dims=1))
+    g_cv_all[k, :] = trace_k .+ phi_dot_score_k
+end
 
 # True posterior mean E[h(X)|Y_obs] (approximated by sample mean of MCMC samples)
 true_mean = mean(h_x_all, dims=2)
@@ -133,21 +141,20 @@ println("True parameter X_true: ", X_true[:, 1])
 println("Posterior mean E[X|Y] (MCMC estimate): ", true_mean')
 println("Number of posterior samples: ", test_size)
 println("\n=== Control Variate Check ===")
-println("Mean of CV g(x,y): ", mean(g_cv_all))
-println("Std of CV g(x,y): ", std(g_cv_all))
-println("Learned offset μ (from training): ", μ[1])
+println("Vector-valued CVs: g1(x,y) for x1, g2(x,y) for x2")
+println("Mean of CV g1: ", mean(g_cv_all[1, :]))
+println("Mean of CV g2: ", mean(g_cv_all[2, :]))
+println("Std of CV g1: ", std(g_cv_all[1, :]))
+println("Std of CV g2: ", std(g_cv_all[2, :]))
+println("Learned offsets μ (from training): μ1=", μ[1], ", μ2=", μ[2])
 println("Mean of h(x): ", mean(h_x_all, dims=2)')
-println("Correlation h(x1) vs g: ", cor(h_x_all[1, :], g_cv_all))
-println("Correlation h(x2) vs g: ", cor(h_x_all[2, :], g_cv_all))
+println("Correlation h(x1) vs g1: ", cor(h_x_all[1, :], g_cv_all[1, :]))
+println("Correlation h(x2) vs g2: ", cor(h_x_all[2, :], g_cv_all[2, :]))
 
-# IMPORTANT: Since E[g] should be 0 by Stein's identity,
-# we can verify this and adjust μ if needed
-μ_adjusted = [mean(g_cv_all)]
-println("\nAdjusted offset μ (for this Y): ", μ_adjusted[1])
-println("Using μ = mean(g) ensures E[g(X,Y_obs)] ≈ 0 for this specific observation")
-
-# Use adjusted μ for variance reduction
-μ = μ_adjusted
+# By Stein's identity, E[g_k|Y] = 0 for each k
+# No offset adjustment needed - μ from training should be sufficient
+println("\nUsing learned offsets from training (no adjustment needed)")
+println("By Stein's identity, E[g_k(X,Y)|Y] = 0 for each CV k")
 
 # Variance reduction analysis
 # Compare vanilla estimator vs. CV-corrected estimator for different sample sizes
@@ -183,9 +190,9 @@ for (idx, n) in enumerate(sample_sizes)
         vanilla_estimates_x1[trial] = mean(h_x_all[1, inds])
         vanilla_estimates_x2[trial] = mean(h_x_all[2, inds])
 
-        # CV estimator: mean of (h(x) - g(x,y)) - μ
-        cv_estimates_x1[trial] = mean(h_x_all[1, inds] .- g_cv_all[inds]) - μ[1]
-        cv_estimates_x2[trial] = mean(h_x_all[2, inds] .- g_cv_all[inds]) - μ[1]
+        # CV estimator: mean of (h_i(x) - g_i(x,y)) (no offset - Stein identity ensures E[g_i]=0)
+        cv_estimates_x1[trial] = mean(h_x_all[1, inds] .- g_cv_all[1, inds])
+        cv_estimates_x2[trial] = mean(h_x_all[2, inds] .- g_cv_all[2, inds])
     end
 
     # Compute MSE (squared bias + variance)
@@ -319,17 +326,17 @@ close(fig)
 # Plot correlation scatter
 fig = figure("correlation", figsize = (12, 5))
 subplot(1, 2, 1)
-scatter(h_x_all[1, :], g_cv_all, alpha = 0.5, s = 10, color = "#1f77b4")
+scatter(h_x_all[1, :], g_cv_all[1, :], alpha = 0.5, s = 10, color = "#1f77b4")
 xlabel("h(x) = x₁")
-ylabel("g(x,y) (control variate)")
-title("x₁ vs CV (ρ = $(round(cor(h_x_all[1, :], g_cv_all), digits=3)))")
+ylabel("g₁(x,y) (control variate)")
+title("x₁ vs CV₁ (ρ = $(round(cor(h_x_all[1, :], g_cv_all[1, :]), digits=3)))")
 grid(true, alpha = 0.3)
 
 subplot(1, 2, 2)
-scatter(h_x_all[2, :], g_cv_all, alpha = 0.5, s = 10, color = "#ff7f0e")
+scatter(h_x_all[2, :], g_cv_all[2, :], alpha = 0.5, s = 10, color = "#ff7f0e")
 xlabel("h(x) = x₂")
-ylabel("g(x,y) (control variate)")
-title("x₂ vs CV (ρ = $(round(cor(h_x_all[2, :], g_cv_all), digits=3)))")
+ylabel("g₂(x,y) (control variate)")
+title("x₂ vs CV₂ (ρ = $(round(cor(h_x_all[2, :], g_cv_all[2, :]), digits=3)))")
 grid(true, alpha = 0.3)
 
 tight_layout()
