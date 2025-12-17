@@ -80,6 +80,7 @@ include("./models/conditional_layers/conditional_layer_glow_cv.jl")
 include("./models/conditional_layers/conditional_layer_basic_cv.jl")
 include("./models/conditional_layers/squeeze_conditional_layer_basic_cv.jl")
 include("./models/conditional_layers/dense_conditional_layer_cv.jl")
+include("./models/conditional_layers/dense_conditional_layer_cv_ensemble.jl")
 
 
 # Invertible network architectures
