@@ -21,6 +21,11 @@ import CNCV: DenseConditionalLayerCV_Reversible, create_forward_reverse_ensemble
 # Random seed
 Random.seed!(19)
 
+args = read_config("gaussian_ensemble_cv_training.json")
+args = parse_input_args(args)
+
+device = cpu
+
 # Problem setup
 n_dim = 2  # 2D problem
 
@@ -28,23 +33,6 @@ n_dim = 2  # 2D problem
 μ_prior = zeros(Float32, n_dim)
 Σ_prior = Float32[2.0 0.5; 0.5 1.0]  # Correlated prior
 L_prior = cholesky(Σ_prior).L
-
-# Likelihood: Y = X + noise, noise ~ N(0, σ²I)
-σ_obs = 0.3f0
-
-# Training parameters
-args = Dict(
-    "n_hidden" => 32,
-    "n_layers" => 3,
-    "lr" => 1f-4,
-    "lr_step" => 100,
-    "max_epoch" => 300,
-    "batchsize" => 256,
-    "sigma" => σ_obs,
-    "sim_name" => "gaussian_ensemble_cv"
-)
-
-device = cpu
 
 # Create ENSEMBLE with forward + reverse splits
 println("Creating forward-reverse ensemble...")
@@ -63,14 +51,14 @@ ntrain = 2^16
 
 # Generate training data from Gaussian prior + Gaussian likelihood
 X_train = μ_prior .+ L_prior * randn(Float32, n_dim, ntrain)
-Y_train = X_train + σ_obs * randn(Float32, n_dim, ntrain)
+Y_train = X_train + args["sigma"] * randn(Float32, n_dim, ntrain)
 X_train = X_train |> device
 Y_train = Y_train |> device
 
 # Validation data
 nval = 2^10
 X_val = μ_prior .+ L_prior * randn(Float32, n_dim, nval)
-Y_val = X_val + σ_obs * randn(Float32, n_dim, nval)
+Y_val = X_val + args["sigma"] * randn(Float32, n_dim, nval)
 X_val = X_val |> device
 Y_val = Y_val |> device
 

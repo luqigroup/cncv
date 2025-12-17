@@ -11,6 +11,8 @@ using Random
 using LinearAlgebra
 using Rosenbrock
 using JLD2
+using PyPlot
+using Seaborn
 
 # Import ensemble functions
 import CNCV: forward
@@ -18,17 +20,23 @@ import CNCV: forward
 # Random seed
 Random.seed!(123)
 
-# Load trained ensemble model
-results_dir = datadir("rosenbrock-ensemble-cv")
-files = readdir(results_dir, join=true)
-latest_file = sort(files, by=mtime)[end]
-println("Loading trained ensemble from: ", basename(latest_file))
+font_prop = set_plot_configs()[1]
+args = read_config("rosenbrock_ensemble_cv_sampling.json")
+args = parse_input_args(args)
 
-data = load(latest_file)
-layer1 = data["layer1"]
-layer2 = data["layer2"]
-μ = data["mu"]
-args = Dict(key => data[key] for key in ["sigma", "n_hidden", "n_layers", "n_samples_test"])
+if args["epoch"] == -1
+    args["epoch"] = args["max_epoch"]
+end
+
+save_path = plotsdir(args["sim_name"], savename(args))
+
+# Load trained ensemble model
+loaded_keys = load_experiment(args, ["layer1", "layer2", "mu", "fval", "fval_eval"])
+layer1 = loaded_keys["layer1"]
+layer2 = loaded_keys["layer2"]
+μ = loaded_keys["mu"]
+fval = loaded_keys["fval"]
+fval_eval = loaded_keys["fval_eval"]
 
 σ_obs = Float32(args["sigma"])
 test_size = args["n_samples_test"]
@@ -87,13 +95,6 @@ for k in 1:2
     g_cv_1[k, :] = trace_k .+ phi_dot_score_k
 end
 
-println("Layer 1 (forward split, transforms x₁):")
-for k in 1:2
-    println("  CV $k: mean = ", mean(g_cv_1[k, :]), ", std = ", std(g_cv_1[k, :]))
-    corr = cor(h_x_all[k, :], g_cv_1[k, :])
-    println("    Correlation with h_$k: ", corr)
-end
-
 # Layer 2
 jac_traces_2, phi_all_2 = forward(X_test, Y_test, layer2)
 g_cv_2 = zeros(Float32, 2, test_size)
@@ -104,17 +105,10 @@ for k in 1:2
     g_cv_2[k, :] = trace_k .+ phi_dot_score_k
 end
 
-println("\nLayer 2 (reverse split, transforms x₂):")
-for k in 1:2
-    println("  CV $k: mean = ", mean(g_cv_2[k, :]), ", std = ", std(g_cv_2[k, :]))
-    corr = cor(h_x_all[k, :], g_cv_2[k, :])
-    println("    Correlation with h_$k: ", corr)
-end
-
 # Combined (average)
 g_cv_combined = (g_cv_1 .+ g_cv_2) ./ 2
 
-println("\nCombined (averaged):")
+println("Ensemble Control Variates:")
 for k in 1:2
     println("  CV $k: mean = ", mean(g_cv_combined[k, :]), ", std = ", std(g_cv_combined[k, :]))
     corr = cor(h_x_all[k, :], g_cv_combined[k, :])
@@ -122,113 +116,359 @@ for k in 1:2
 end
 
 println("\n=== Stein's Identity Check ===")
-println("Each CV should have E[g_k|Y] ≈ 0")
-println("\nLayer 1:")
-for k in 1:2
-    ratio = abs(mean(g_cv_1[k, :])) / std(g_cv_1[k, :])
-    println("  E[g_$k] / Std[g_$k] = ", ratio, " (should be << 1)")
-end
-
-println("\nLayer 2:")
-for k in 1:2
-    ratio = abs(mean(g_cv_2[k, :])) / std(g_cv_2[k, :])
-    println("  E[g_$k] / Std[g_$k] = ", ratio, " (should be << 1)")
-end
-
-println("\nCombined:")
+println("Ensemble CV should have E[g_k|Y] ≈ 0")
 for k in 1:2
     ratio = abs(mean(g_cv_combined[k, :])) / std(g_cv_combined[k, :])
-    println("  E[g_$k] / Std[g_$k] = ", ratio, " (should be << 1)")
+    println("  Component $k: E[g_$k] / Std[g_$k] = ", round(ratio, digits=4), " (should be << 1)")
 end
 
 # Variance analysis (relative variance comparison)
-println("\n=== Variance Comparison ===")
+# Compute numerical ground truth using all samples (approximation of true posterior mean)
+numerical_ground_truth = vec(mean(X_test, dims=2))
 
-# We don't know true posterior mean for Rosenbrock, so we compare VARIANCES
-# Var[h - g] vs Var[h]
+println("\n=== Variance Reduction Summary ===")
+println("Numerical ground truth E[X|Y] ≈ ", numerical_ground_truth')
 
-println("\nComponent 1:")
 var_h_1 = var(h_x_all[1, :])
-var_h_minus_g_l1_1 = var(h_x_all[1, :] .- g_cv_1[1, :])
-var_h_minus_g_l2_1 = var(h_x_all[1, :] .- g_cv_2[1, :])
 var_h_minus_g_comb_1 = var(h_x_all[1, :] .- g_cv_combined[1, :])
-
-println("  Var[h₁]: ", var_h_1)
-println("  Var[h₁ - g₁^(layer1)]: ", var_h_minus_g_l1_1, " (VRF: ", var_h_minus_g_l1_1/var_h_1, ")")
-println("  Var[h₁ - g₁^(layer2)]: ", var_h_minus_g_l2_1, " (VRF: ", var_h_minus_g_l2_1/var_h_1, ")")
-println("  Var[h₁ - g₁^(combined)]: ", var_h_minus_g_comb_1, " (VRF: ", var_h_minus_g_comb_1/var_h_1, ")")
-
-if var_h_minus_g_comb_1 < var_h_1
-    reduction = (1 - var_h_minus_g_comb_1/var_h_1) * 100
-    println("  → ✓ Combined reduces variance by $(round(reduction, digits=1))%")
-else
-    increase = (var_h_minus_g_comb_1/var_h_1 - 1) * 100
-    println("  → ✗ Combined increases variance by $(round(increase, digits=1))%")
-end
-
-println("\nComponent 2:")
-var_h_2 = var(h_x_all[2, :])
-var_h_minus_g_l1_2 = var(h_x_all[2, :] .- g_cv_1[2, :])
-var_h_minus_g_l2_2 = var(h_x_all[2, :] .- g_cv_2[2, :])
-var_h_minus_g_comb_2 = var(h_x_all[2, :] .- g_cv_combined[2, :])
-
-println("  Var[h₂]: ", var_h_2)
-println("  Var[h₂ - g₂^(layer1)]: ", var_h_minus_g_l1_2, " (VRF: ", var_h_minus_g_l1_2/var_h_2, ")")
-println("  Var[h₂ - g₂^(layer2)]: ", var_h_minus_g_l2_2, " (VRF: ", var_h_minus_g_l2_2/var_h_2, ")")
-println("  Var[h₂ - g₂^(combined)]: ", var_h_minus_g_comb_2, " (VRF: ", var_h_minus_g_comb_2/var_h_2, ")")
-
-if var_h_minus_g_comb_2 < var_h_2
-    reduction = (1 - var_h_minus_g_comb_2/var_h_2) * 100
-    println("  → ✓ Combined reduces variance by $(round(reduction, digits=1))%")
-else
-    increase = (var_h_minus_g_comb_2/var_h_2 - 1) * 100
-    println("  → ✗ Combined increases variance by $(round(increase, digits=1))%")
-end
-
-# Summary
-println("\n=== Summary ===")
 vrf_comb_1 = var_h_minus_g_comb_1 / var_h_1
+
+var_h_2 = var(h_x_all[2, :])
+var_h_minus_g_comb_2 = var(h_x_all[2, :] .- g_cv_combined[2, :])
 vrf_comb_2 = var_h_minus_g_comb_2 / var_h_2
 
-println("\nOverall Variance Reduction Factors:")
-println("  Component 1: VRF = ", vrf_comb_1)
-println("  Component 2: VRF = ", vrf_comb_2)
+println("\nComponent 1: VRF = $(round(vrf_comb_1, digits=4))")
+if vrf_comb_1 < 1.0
+    reduction = (1 - vrf_comb_1) * 100
+    println("  → Variance reduced by $(round(reduction, digits=1))%")
+else
+    increase = (vrf_comb_1 - 1) * 100
+    println("  → WARNING: Variance increased by $(round(increase, digits=1))%")
+end
+
+println("\nComponent 2: VRF = $(round(vrf_comb_2, digits=4))")
+if vrf_comb_2 < 1.0
+    reduction = (1 - vrf_comb_2) * 100
+    println("  → Variance reduced by $(round(reduction, digits=1))%")
+else
+    increase = (vrf_comb_2 - 1) * 100
+    println("  → WARNING: Variance increased by $(round(increase, digits=1))%")
+end
 
 if vrf_comb_1 < 1.0 && vrf_comb_2 < 1.0
     avg_reduction = ((1 - vrf_comb_1) + (1 - vrf_comb_2)) / 2 * 100
-    println("\n✓ SUCCESS! Average variance reduction: $(round(avg_reduction, digits=1))%")
+    println("\n✓ Average variance reduction: $(round(avg_reduction, digits=1))%")
+end
+
+# ============= MSE ANALYSIS ACROSS SAMPLE SIZES =============
+
+sample_sizes = [50, 100, 200, 500, 1000, 2000, 5000]
+vanilla_mse = zeros(Float32, length(sample_sizes), 2)
+cv_combined_mse = zeros(Float32, length(sample_sizes), 2)
+
+num_trials = 100
+
+println("\n=== Computing MSE across sample sizes ===")
+for (idx, n) in enumerate(sample_sizes)
+    vanilla_estimates = zeros(Float32, num_trials, 2)
+    cv_combined_estimates = zeros(Float32, num_trials, 2)
+
+    for trial in 1:num_trials
+        inds = randperm(test_size)[1:n]
+
+        # Vanilla Monte Carlo
+        for i in 1:2
+            vanilla_estimates[trial, i] = mean(h_x_all[i, inds])
+        end
+
+        # Combined CV
+        for i in 1:2
+            cv_combined_estimates[trial, i] = mean(h_x_all[i, inds] .- g_cv_combined[i, inds])
+        end
+    end
+
+    # Compute MSE relative to numerical ground truth
+    for i in 1:2
+        vanilla_mse[idx, i] = mean((vanilla_estimates[:, i] .- numerical_ground_truth[i]).^2)
+        cv_combined_mse[idx, i] = mean((cv_combined_estimates[:, i] .- numerical_ground_truth[i]).^2)
+    end
+end
+
+println("MSE analysis complete")
+
+# ============= PLOTTING =============
+
+# 1. Training loss plot
+fig = figure("training logs", figsize = (7, 4))
+if args["epoch"] == args["max_epoch"]
+    plot(
+        range(0, args["epoch"], length = length(fval)),
+        fval,
+        color = "#4a4a4a",
+        label = "training loss",
+    )
+    plot(
+        range(0, args["epoch"], length = length(fval_eval)),
+        fval_eval,
+        color = "#a1a1a1",
+        label = "validation loss",
+    )
 else
-    println("\n✗ WARNING: Ensemble did not achieve variance reduction on both components")
+    plot(
+        range(0, args["epoch"], length = length(fval[1:findfirst(fval .== 0.0f0)-1])),
+        fval[1:findfirst(fval .== 0.0f0)-1],
+        color = "#4a4a4a",
+        label = "training loss",
+    )
+    plot(
+        range(
+            0,
+            args["epoch"],
+            length = length(fval_eval[1:findfirst(fval_eval .== 0.0f0)-1]),
+        ),
+        fval_eval[1:findfirst(fval_eval .== 0.0f0)-1],
+        color = "#a1a1a1",
+        label = "validation loss",
+    )
+end
+legend()
+title("Training objective")
+ylabel("MSE Loss")
+xlabel("Epochs")
+xlim([0.0, args["epoch"]])
+wsave(joinpath(save_path, "training-obj.png"), fig)
+close(fig)
+
+# 2. MSE comparison plot across sample sizes
+fig = figure("mse comparison", figsize = (10, 5))
+
+for i in 1:2
+    subplot(1, 2, i)
+    plot(sample_sizes, vanilla_mse[:, i], "o-", label = "Vanilla MC", linewidth = 2, markersize = 6, color = "#7f7f7f")
+    plot(sample_sizes, cv_combined_mse[:, i], "d-", label = "Ensemble CV", linewidth = 2, markersize = 6, color = "#d62728")
+
+    # Add 1/n reference line
+    reference_1_over_n = vanilla_mse[1, i] * (sample_sizes[1] ./ sample_sizes)
+    plot(sample_sizes, reference_1_over_n, "--", label = "1/n", linewidth = 1.5, color = "k", alpha = 0.5)
+
+    xlabel("Sample size")
+    ylabel("MSE")
+    title("Component $i")
+    xscale("log")
+    yscale("log")
+    legend()
+    grid(true, alpha = 0.3)
+end
+tight_layout()
+wsave(joinpath(save_path, "mse-comparison.png"), fig)
+close(fig)
+
+# 3. Prior distribution samples
+fig = figure("rosenbrock samples", figsize = (6, 6))
+ax = fig.add_subplot(111)
+ax.patch.set_facecolor("white")
+scatter(X_test[1, :], X_test[2, :], s = 0.5, color = "#000000", alpha = 0.15, label = "Prior samples")
+grid(false)
+ax.set_xlim([-3, 3])
+ax.set_ylim([-2.5, 7])
+ax.set_ylabel(L"$x_2$")
+ax.set_xlabel(L"$x_1$")
+ax.legend(loc = "upper right")
+ax.set_title("Rosenbrock Prior Distribution")
+wsave(joinpath(save_path, "prior-samples.png"), fig)
+close(fig)
+
+# 4. Violin plots of estimator distributions
+# Use a moderate sample size to show variance
+n_violin = 200
+num_violin_trials = 200
+
+fig = figure("estimator distributions", figsize = (10, 5))
+
+for comp in 1:2
+    subplot(1, 2, comp)
+
+    # Collect estimates from multiple trials
+    vanilla_ests = zeros(Float32, num_violin_trials)
+    combined_ests = zeros(Float32, num_violin_trials)
+
+    for trial in 1:num_violin_trials
+        inds = randperm(test_size)[1:n_violin]
+
+        vanilla_ests[trial] = mean(h_x_all[comp, inds])
+        combined_ests[trial] = mean(h_x_all[comp, inds] .- g_cv_combined[comp, inds])
+    end
+
+    # Create violin plots
+    positions = [1, 2]
+    data_to_plot = [vanilla_ests, combined_ests]
+
+    parts = plt.violinplot(data_to_plot, positions=positions, showmeans=true, showmedians=true)
+
+    # Mark numerical ground truth
+    axhline(y = numerical_ground_truth[comp], color = "k", linestyle = "--", linewidth = 2, label = "Numerical ground truth")
+
+    xticks(positions, ["Vanilla MC", "Ensemble CV"])
+    ylabel("Estimate of E[X_$comp|Y]")
+    title("Component $comp (n=$n_violin, $(num_violin_trials) trials)")
+    legend()
+    grid(true, alpha = 0.3, axis = "y")
+
+    # Add variance text
+    var_vanilla = var(vanilla_ests)
+    var_combined = var(combined_ests)
+    vrf = var_combined / var_vanilla
+    reduction_pct = (1 - vrf) * 100
+    text(0.5, 0.95, "VRF = $(round(vrf, digits=3))\nReduction = $(round(reduction_pct, digits=1))%",
+         transform=gca().transAxes, horizontalalignment="center", verticalalignment="top",
+         bbox=Dict("boxstyle" => "round", "facecolor" => "wheat", "alpha" => 0.5))
 end
 
-println("\n=== Comparison with Single-Layer Results ===")
-println("(From previous rosenbrock_dense_cv run)")
-println("Single layer Component 1: VRF ≈ 26.5 (2554% increase)")
-println("Single layer Component 2: VRF ≈ 12.7 (1171% increase)")
+tight_layout()
+wsave(joinpath(save_path, "estimator-distributions.png"), fig)
+close(fig)
 
-if vrf_comb_1 < 26.5 && vrf_comb_2 < 12.7
-    println("\n✓ Ensemble is MUCH better than single layer!")
-    println("  Component 1: $(round((26.5 - vrf_comb_1)/26.5 * 100, digits=1))% improvement")
-    println("  Component 2: $(round((12.7 - vrf_comb_2)/12.7 * 100, digits=1))% improvement")
+# 5. Variance Reduction Factor across sample sizes
+sample_sizes_vrf = [50, 100, 200, 500, 1000, 2000]
+num_vrf_trials = 200
+
+fig = figure("vrf vs sample size", figsize = (10, 5))
+
+for comp in 1:2
+    subplot(1, 2, comp)
+
+    # Compute variance for each sample size by running trials
+    vanilla_var_vs_n = zeros(Float32, length(sample_sizes_vrf))
+    layer1_var_vs_n = zeros(Float32, length(sample_sizes_vrf))
+    layer2_var_vs_n = zeros(Float32, length(sample_sizes_vrf))
+    combined_var_vs_n = zeros(Float32, length(sample_sizes_vrf))
+
+    vrf_layer1_vs_n = zeros(Float32, length(sample_sizes_vrf))
+    vrf_layer2_vs_n = zeros(Float32, length(sample_sizes_vrf))
+    vrf_combined_vs_n = zeros(Float32, length(sample_sizes_vrf))
+
+    for (idx, n) in enumerate(sample_sizes_vrf)
+        vanilla_ests = zeros(Float32, num_vrf_trials)
+        layer1_ests = zeros(Float32, num_vrf_trials)
+        layer2_ests = zeros(Float32, num_vrf_trials)
+        combined_ests = zeros(Float32, num_vrf_trials)
+
+        for trial in 1:num_vrf_trials
+            inds = randperm(test_size)[1:n]
+            vanilla_ests[trial] = mean(h_x_all[comp, inds])
+            layer1_ests[trial] = mean(h_x_all[comp, inds] .- g_cv_1[comp, inds])
+            layer2_ests[trial] = mean(h_x_all[comp, inds] .- g_cv_2[comp, inds])
+            combined_ests[trial] = mean(h_x_all[comp, inds] .- g_cv_combined[comp, inds])
+        end
+
+        vanilla_var_vs_n[idx] = var(vanilla_ests)
+        layer1_var_vs_n[idx] = var(layer1_ests)
+        layer2_var_vs_n[idx] = var(layer2_ests)
+        combined_var_vs_n[idx] = var(combined_ests)
+
+        vrf_layer1_vs_n[idx] = layer1_var_vs_n[idx] / vanilla_var_vs_n[idx]
+        vrf_layer2_vs_n[idx] = layer2_var_vs_n[idx] / vanilla_var_vs_n[idx]
+        vrf_combined_vs_n[idx] = combined_var_vs_n[idx] / vanilla_var_vs_n[idx]
+    end
+
+    plot(sample_sizes_vrf, vrf_layer1_vs_n, "s-", linewidth = 2, markersize = 6, label = "VRF (Layer 1)", alpha = 0.7)
+    plot(sample_sizes_vrf, vrf_layer2_vs_n, "^-", linewidth = 2, markersize = 6, label = "VRF (Layer 2)", alpha = 0.7)
+    plot(sample_sizes_vrf, vrf_combined_vs_n, "o-", linewidth = 2, markersize = 8, label = "VRF (Combined)", color = "#d62728")
+    axhline(y = 1.0, color = "k", linestyle = "--", linewidth = 1, label = "No reduction")
+
+    # Add single layer baseline as reference
+    axhline(y = (comp == 1 ? 26.5 : 12.7), color = "#bcbd22", linestyle = ":", linewidth = 2, label = "Single layer baseline")
+
+    xlabel("Sample size")
+    ylabel("Variance Reduction Factor")
+    title("Component $comp: VRF vs Sample Size")
+    xscale("log")
+    legend()
+    grid(true, alpha = 0.3)
+    ylim([0, max(2.0, maximum(vrf_combined_vs_n) * 1.2)])
 end
 
-# Detailed correlation analysis
-println("\n=== Detailed Correlation Analysis ===")
-println("\nCross-correlations (should show specialization):")
-println("  Layer 1: Corr(h₁, g₁) vs Corr(h₂, g₁)")
-corr_l1_11 = cor(h_x_all[1, :], g_cv_1[1, :])
-corr_l1_21 = cor(h_x_all[2, :], g_cv_1[1, :])
-println("    Corr(h₁, g₁^L1) = ", corr_l1_11)
-println("    Corr(h₂, g₁^L1) = ", corr_l1_21)
-if abs(corr_l1_11) > abs(corr_l1_21)
-    println("    ✓ Layer 1 CV₁ specializes on component 1")
+tight_layout()
+wsave(joinpath(save_path, "vrf-vs-sample-size.png"), fig)
+close(fig)
+
+# 6. Variance comparison across methods
+fig = figure("variance comparison", figsize = (10, 5))
+
+for comp in 1:2
+    subplot(1, 2, comp)
+
+    # Compute actual variances for a fixed sample size
+    n_var = 200
+    num_var_trials = 500
+
+    vanilla_ests = zeros(Float32, num_var_trials)
+    combined_ests = zeros(Float32, num_var_trials)
+
+    for trial in 1:num_var_trials
+        inds = randperm(test_size)[1:n_var]
+        vanilla_ests[trial] = mean(h_x_all[comp, inds])
+        combined_ests[trial] = mean(h_x_all[comp, inds] .- g_cv_combined[comp, inds])
+    end
+
+    vars = [var(vanilla_ests), var(combined_ests)]
+    labels = ["Vanilla MC", "Ensemble CV"]
+    colors = ["#7f7f7f", "#d62728"]
+
+    bar(1:2, vars, color = colors, alpha = 0.8, width = 0.6)
+    xticks(1:2, labels)
+    ylabel("Var[estimator]")
+    title("Component $comp: Estimator Variance (n=$n_var)")
+    grid(true, alpha = 0.3, axis = "y")
+    yscale("log")
+
+    # Add VRF annotation
+    vrf = vars[2] / vars[1]
+    reduction_pct = (1 - vrf) * 100
+
+    # Single layer baseline VRF
+    single_vrf = comp == 1 ? 26.5 : 12.7
+    improvement = (single_vrf - vrf) / single_vrf * 100
+
+    text(0.5, 0.95, "VRF = $(round(vrf, digits=3))\nReduction = $(round(reduction_pct, digits=1))%\nImprovement over single = $(round(improvement, digits=1))%",
+         transform=gca().transAxes, horizontalalignment="center", verticalalignment="top",
+         bbox=Dict("boxstyle" => "round", "facecolor" => "wheat", "alpha" => 0.5))
 end
 
-println("\n  Layer 2: Corr(h₁, g₁) vs Corr(h₂, g₁)")
-corr_l2_11 = cor(h_x_all[1, :], g_cv_2[1, :])
-corr_l2_21 = cor(h_x_all[2, :], g_cv_2[1, :])
-println("    Corr(h₁, g₁^L2) = ", corr_l2_11)
-println("    Corr(h₂, g₁^L2) = ", corr_l2_21)
-if abs(corr_l2_11) > abs(corr_l2_21)
-    println("    ✓ Layer 2 CV₁ specializes on component 1")
+tight_layout()
+wsave(joinpath(save_path, "variance-comparison.png"), fig)
+close(fig)
+
+# 7. Scatter plots showing h vs g_cv
+fig = figure("scatter plots", figsize = (12, 8))
+
+for i in 1:2
+    # Layer 1
+    subplot(2, 3, (i-1)*3 + 1)
+    scatter(h_x_all[i, :], g_cv_1[i, :], s = 1, alpha = 0.3)
+    xlabel("h_$i(x)")
+    ylabel("g_$i^(L1)")
+    title("Layer 1: Component $i")
+    grid(true, alpha = 0.3)
+
+    # Layer 2
+    subplot(2, 3, (i-1)*3 + 2)
+    scatter(h_x_all[i, :], g_cv_2[i, :], s = 1, alpha = 0.3)
+    xlabel("h_$i(x)")
+    ylabel("g_$i^(L2)")
+    title("Layer 2: Component $i")
+    grid(true, alpha = 0.3)
+
+    # Combined
+    subplot(2, 3, (i-1)*3 + 3)
+    scatter(h_x_all[i, :], g_cv_combined[i, :], s = 1, alpha = 0.3, color = "#d62728")
+    xlabel("h_$i(x)")
+    ylabel("g_$i^(combined)")
+    title("Combined: Component $i")
+    grid(true, alpha = 0.3)
 end
+tight_layout()
+wsave(joinpath(save_path, "scatter-h-vs-gcv.png"), fig)
+close(fig)
+
+upload_to_dropbox(args["sim_name"])
