@@ -72,22 +72,16 @@ include("./models/layers/invertible_layer_actnorm_cv.jl")
 include("./models/layers/invertible_layer_conv1x1.jl")
 include("./models/layers/invertible_layer_conv1x1_cv.jl")
 include("./models/layers/invertible_layer_basic.jl")
-include("./models/layers/invertible_layer_basic_cv.jl")
 include("./models/layers/invertible_layer_glow.jl")
-include("./models/layers/invertible_layer_glow_cv.jl")
 include("./models/conditional_layers/conditional_layer_glow.jl")
-include("./models/conditional_layers/conditional_layer_glow_cv.jl")
 include("./models/conditional_layers/conditional_layer_basic_cv.jl")
-include("./models/conditional_layers/squeeze_conditional_layer_basic_cv.jl")
 include("./models/conditional_layers/dense_conditional_layer_cv.jl")
 include("./models/conditional_layers/dense_conditional_layer_cv_ensemble.jl")
 
 
 # Invertible network architectures
 include("./models/networks/invertible_network_glow.jl")  # Glow: Dinh et al. (2017), Kingma and Dhariwal (2018)
-include("./models/networks/invertible_network_glow_cv.jl")
 include("./models/networks/invertible_network_conditional_glow.jl")
-include("./models/networks/invertible_network_conditional_glow_cv.jl")
 
 # Utilities.
 include("./utils/load_experiment.jl")
