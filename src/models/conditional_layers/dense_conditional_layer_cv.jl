@@ -82,10 +82,9 @@ function DenseConditionalLayerCV(n_in::Int, n_cond::Int, n_hidden::Int, n_layers
     end
 
     # Output layer: n_hidden -> n_out (no activation, we apply coupling_activation separately)
-    # Initialize output layer to ZEROS so φ starts small
-    W_out = zeros(Float32, n_out, n_hidden)
-    b_out = zeros(Float32, n_out)
-    push!(layers, Flux.Dense(W_out, b_out))
+    # Initialize with small random weights (will be scaled down further in training if needed)
+    # NOTE: Don't use zeros! Network gets stuck and cannot learn.
+    push!(layers, Flux.Dense(n_hidden, n_out))
 
     # Create Flux Chain
     model = Flux.Chain(layers...)

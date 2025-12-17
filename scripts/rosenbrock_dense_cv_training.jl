@@ -34,10 +34,8 @@ CV = DenseConditionalLayerCV(
     activation=tanh,
     n_cv=2  # Vector-valued: 2 CVs (one per component)
 )
-# Scale down initial weights to make φ small initially
-for p in get_params(CV)
-    p.data .*= 0.01f0  # Start with small φ
-end
+# NOTE: Use Flux's default initialization. Don't scale weights!
+# The old 0.01 scaling caused zero-initialization bug → network couldn't learn.
 CV = CV |> device
 
 # Training data number
