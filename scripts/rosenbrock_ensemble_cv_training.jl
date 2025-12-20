@@ -1,5 +1,6 @@
 # Training script for Rosenbrock prior with ENSEMBLE CV network
 # Tests the forward-reverse ensemble on Rosenbrock distribution
+# Can use either LEARNED or TRUE analytical score function
 # Authors: Ali Siahkoohi, alisk@ucf.edu
 # Date: December 2025
 
@@ -24,6 +25,21 @@ Random.seed!(19)
 args = read_config("rosenbrock_ensemble_cv_training.json")
 args = parse_input_args(args)
 
+# Conditionally load pretrained amortized model for learned likelihood
+if args["learned_score"] != 0
+    println("Loading pretrained amortized model for learned log-likelihood...")
+    amortized_args = read_config("rosenbrock_amortized_sampling.json")
+    if amortized_args["epoch"] == -1
+        amortized_args["epoch"] = amortized_args["max_epoch"]
+    end
+    loaded_amortized = load_experiment(amortized_args, ["G"])
+    G_amortized = loaded_amortized["G"]
+    println("Loaded amortized model successfully!")
+else
+    println("Using TRUE analytical score function (Gaussian + Rosenbrock)")
+    G_amortized = nothing
+end
+
 device = cpu
 
 # Create ENSEMBLE with forward + reverse splits
@@ -39,7 +55,7 @@ println("Layer 2 (reverse split): reverse_split = ", layer2.reverse_split)
 println("Number of layers in ensemble: ", length(ensemble.layers))
 
 # Training data
-ntrain = 2^16
+ntrain = 5120
 
 # Generate training data from Rosenbrock prior + Gaussian likelihood
 RB_dist = RosenbrockDistribution(0.0f0, 5.0f-1)
@@ -51,7 +67,7 @@ X_train = X_train |> device
 Y_train = Y_train |> device
 
 # Validation data
-nval = 2^10
+nval = 512
 X_val = rand(RB_dist, nval)
 Y_val = X_val + args["sigma"] * randn(Float32, 2, nval)
 X_val = X_val |> device
@@ -76,30 +92,47 @@ opt = Flux.Optimiser(
 fval = zeros(Float32, num_batches * args["max_epoch"])
 fval_eval = zeros(Float32, args["max_epoch"])
 
-# Score function for Rosenbrock posterior
-function compute_score_posterior(X::AbstractMatrix{T}, Y::AbstractMatrix{T}, sigma::T) where T
-    # Gradient of log likelihood: ∇ log p(y|x) = -(x-y)/σ²
-    grad_likelihood = -(X .- Y) ./ (sigma^2)
+# Rosenbrock distribution for analytical score (if needed)
+RB_dist = RosenbrockDistribution(0.0f0, 5.0f-1)
 
-    # Gradient of log prior: use gradlogpdf from Rosenbrock
-    grad_prior = gradlogpdf(RB_dist, X)
+# Score function: switches between learned and true based on args["learned_score"]
+function compute_score_posterior(X::AbstractMatrix{T}, Y::AbstractMatrix{T}) where T
+    if args["learned_score"] != 0
+        # Use LEARNED score from pretrained amortized model
+        batchsize = size(X, 2)
+        X_net = reshape(X, 1, 1, 2, batchsize)
+        Y_net = reshape(Y, 1, 1, 2, batchsize)
 
-    # Total gradient
-    grad_log_post = grad_likelihood .+ grad_prior
+        # Compute score using exact_score function
+        ΔX_net = exact_score(G_amortized, X_net, Y_net)
+
+        # Reshape back to 2×batchsize
+        grad_log_post = reshape(ΔX_net, 2, batchsize)
+    else
+        # Use TRUE analytical score: ∇ log p(x|y) = ∇ log p(y|x) + ∇ log p(x)
+        # Gradient of Gaussian likelihood: ∇ log p(y|x) = -(x-y)/σ²
+        grad_likelihood = -(X .- Y) ./ (args["sigma"]^2)
+
+        # Gradient of Rosenbrock prior
+        grad_prior = gradlogpdf(RB_dist, X)
+
+        # Total gradient
+        grad_log_post = grad_likelihood .+ grad_prior
+    end
 
     return grad_log_post
 end
 
 # Loss function with ENSEMBLE
-function loss_ensemble_cv(ensemble, X, Y, μ, sigma)
+function loss_ensemble_cv(ensemble, X, Y, μ)
     batchsize = size(X, 2)
     n_cv = 2
 
     # Quantity of interest: h(x) = x
     h_x = X
 
-    # Compute score
-    score_term = compute_score_posterior(X, Y, sigma)
+    # Compute score (learned or true analytical)
+    score_term = compute_score_posterior(X, Y)
 
     # Forward through BOTH layers and combine
     layer1 = ensemble.layers[1]
@@ -141,7 +174,7 @@ end
 for epoch = 1:args["max_epoch"]
 
     # Evaluate on validation set
-    fval_eval[epoch] = loss_ensemble_cv(ensemble, X_val, Y_val, μ, args["sigma"])[1]
+    fval_eval[epoch] = loss_ensemble_cv(ensemble, X_val, Y_val, μ)[1]
 
     for (itr, (X, Y)) in enumerate(train_loader)
         Base.flush(Base.stdout)
@@ -150,7 +183,7 @@ for epoch = 1:args["max_epoch"]
 
         # Forward pass
         h_x = X
-        score_term = compute_score_posterior(X, Y, Float32(args["sigma"]))
+        score_term = compute_score_posterior(X, Y)
 
         # Layer 1
         jac_traces_1, phi_all_1 = forward(X, Y, layer1)

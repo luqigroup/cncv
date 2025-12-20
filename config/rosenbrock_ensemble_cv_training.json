@@ -7,5 +7,6 @@
     "batchsize": 512,
     "n_hidden": 128,
     "n_layers": 5,
-    "n_samples_test": 10000
+    "n_samples_test": 10000,
+    "learned_score": 1
 }

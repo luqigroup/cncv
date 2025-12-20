@@ -1,5 +1,6 @@
 # Sampling and evaluation script for Rosenbrock ENSEMBLE CV
 # Tests if forward-reverse ensemble fixes the variance problem for Rosenbrock
+# Can use either LEARNED or TRUE analytical score function
 # Authors: Ali Siahkoohi, alisk@ucf.edu
 # Date: December 2025
 
@@ -29,6 +30,19 @@ if args["epoch"] == -1
 end
 
 save_path = plotsdir(args["sim_name"], savename(args))
+
+# Conditionally load pretrained amortized model for learned likelihood
+if args["learned_score"] != 0
+    println("Loading pretrained amortized model for learned log-likelihood...")
+    amortized_args = read_config("rosenbrock_amortized_training.json")
+    amortized_args["epoch"] = -1  # Load final epoch
+    loaded_amortized = load_experiment(amortized_args, ["G"])
+    G_amortized = loaded_amortized["G"]
+    println("Loaded amortized model successfully!")
+else
+    println("Using TRUE analytical score function (Gaussian + Rosenbrock)")
+    G_amortized = nothing
+end
 
 # Load trained ensemble model
 loaded_keys = load_experiment(args, ["layer1", "layer2", "mu", "fval", "fval_eval"])
@@ -70,14 +84,35 @@ println("Observation Y: ", Y_obs')
 # Create conditioning: all samples observe the same Y
 Y_test = repeat(Y_obs, 1, test_size)
 
-# Compute score function
-function compute_score_posterior(X, Y, sigma)
-    grad_likelihood = -(X .- Y) ./ (sigma^2)
-    grad_prior = gradlogpdf(RB_dist, X)
-    return grad_likelihood .+ grad_prior
+# Score function: switches between learned and true based on args["learned_score"]
+function compute_score_posterior(X::AbstractMatrix{T}, Y::AbstractMatrix{T}) where T
+    if args["learned_score"] != 0
+        # Use LEARNED score from pretrained amortized model
+        batchsize = size(X, 2)
+        X_net = reshape(X, 1, 1, 2, batchsize)
+        Y_net = reshape(Y, 1, 1, 2, batchsize)
+
+        # Compute score using exact_score function
+        ΔX_net = exact_score(G_amortized, X_net, Y_net)
+
+        # Reshape back to 2×batchsize
+        grad_log_post = reshape(ΔX_net, 2, batchsize)
+    else
+        # Use TRUE analytical score: ∇ log p(x|y) = ∇ log p(y|x) + ∇ log p(x)
+        # Gradient of Gaussian likelihood: ∇ log p(y|x) = -(x-y)/σ²
+        grad_likelihood = -(X .- Y) ./ (σ_obs^2)
+
+        # Gradient of Rosenbrock prior
+        grad_prior = gradlogpdf(RB_dist, X)
+
+        # Total gradient
+        grad_log_post = grad_likelihood .+ grad_prior
+    end
+
+    return grad_log_post
 end
 
-score_term = compute_score_posterior(X_test, Y_test, σ_obs)
+score_term = compute_score_posterior(X_test, Y_test)
 
 # Quantity of interest: h(x) = x
 h_x_all = X_test
