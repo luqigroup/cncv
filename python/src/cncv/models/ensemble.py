@@ -139,3 +139,62 @@ def create_forward_reverse_ensemble(
     )
 
     return EnsembleDenseCV([layer1, layer2], combination_mode="average")
+
+
+def create_random_split_ensemble(
+    n_in: int,
+    n_cond: int,
+    n_hidden: int,
+    n_ensemble_members: int,
+    n_layers: int = 3,
+    activation: nn.Module = None,
+    n_cv: int = None,
+    seed: int = 1,
+) -> EnsembleDenseCV:
+    """Create an ensemble with random split directions.
+
+    Each ensemble member will have a randomly chosen reverse_split direction.
+    This allows for more diverse coverage of the input space compared to
+    just forward/reverse splits.
+
+    Args:
+        n_in: Input dimension
+        n_cond: Conditioning dimension
+        n_hidden: Hidden layer width
+        n_ensemble_members: Number of ensemble members
+        n_layers: Number of MLP layers (default: 3)
+        activation: Activation function (default: nn.Tanh())
+        n_cv: Number of control variates (default: None, uses n_in)
+        seed: Random seed for split directions (default: None)
+
+    Returns:
+        EnsembleDenseCV with n_ensemble_members layers
+    """
+    if activation is None:
+        activation = nn.ReLU()
+
+    # Set random seed if provided for reproducible splits
+    if seed is not None:
+        import random
+
+        random.seed(seed)
+        torch.manual_seed(seed)
+
+    # Create ensemble members with random split directions
+    ensemble_layers = []
+    for i in range(n_ensemble_members):
+        # Randomly choose split direction
+        reverse_split = bool(torch.rand(1).item() > 0.5)
+
+        layer = DenseConditionalLayerCV_Reversible(
+            n_in,
+            n_cond,
+            n_hidden,
+            n_layers,
+            activation=activation,
+            n_cv=n_cv,
+            reverse_split=reverse_split,
+        )
+        ensemble_layers.append(layer)
+
+    return EnsembleDenseCV(ensemble_layers, combination_mode="average")

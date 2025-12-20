@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from cncv import (
     create_forward_reverse_ensemble,
+    create_random_split_ensemble,
     compute_score_posterior_gaussian,
     compute_exact_posterior,
 )
@@ -91,21 +92,24 @@ class GaussianEnsembleCV:
 
         # Create ensemble
         print("\n=== Creating Ensemble ===")
-        self.ensemble = create_forward_reverse_ensemble(
+
+        # Use random split ensemble if n_ensemble_members is specified
+        print(
+            f"Using random split ensemble with {args.n_ensemble_members} members"
+        )
+        self.ensemble = create_random_split_ensemble(
             self.n_dim,
             self.n_dim,
             args.n_hidden,
+            args.n_ensemble_members,
             args.n_layers,
             n_cv=self.n_dim,
+            seed=12,
         ).to(self.device)
 
-        print(
-            f"Layer 1 (forward split): reverse_split = {self.ensemble.layers[0].reverse_split}"
-        )
-        print(
-            f"Layer 2 (reverse split): reverse_split = {self.ensemble.layers[1].reverse_split}"
-        )
-        print(f"Number of layers in ensemble: {len(self.ensemble.layers)}")
+        print(f"Number of ensemble members: {len(self.ensemble.layers)}")
+        for i, layer in enumerate(self.ensemble.layers):
+            print(f"  Member {i + 1}: reverse_split = {layer.reverse_split}")
 
         # Count parameters
         num_params = sum(
