@@ -55,7 +55,7 @@ println("Layer 2 (reverse split): reverse_split = ", layer2.reverse_split)
 println("Number of layers in ensemble: ", length(ensemble.layers))
 
 # Training data
-ntrain = 5120
+ntrain = 2^16
 
 # Generate training data from Rosenbrock prior + Gaussian likelihood
 RB_dist = RosenbrockDistribution(0.0f0, 5.0f-1)
@@ -67,7 +67,7 @@ X_train = X_train |> device
 Y_train = Y_train |> device
 
 # Validation data
-nval = 512
+nval = 2^10
 X_val = rand(RB_dist, nval)
 Y_val = X_val + args["sigma"] * randn(Float32, 2, nval)
 X_val = X_val |> device

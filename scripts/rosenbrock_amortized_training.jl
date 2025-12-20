@@ -30,7 +30,7 @@ G = NetworkConditionalGlow(
 G = G |> device
 
 # Training data number.
-ntrain = 5120
+ntrain = 2^16
 
 # Generate training data: rand returns 2×ntrain, reshape to 1×1×2×ntrain
 RB_dist = RosenbrockDistribution(0.0f0, 5.0f-1)
@@ -41,7 +41,7 @@ X_train = X_train |> device
 Y_train = Y_train |> device
 
 # Validation data number.
-nval = 512
+nval = 2^10
 X_val_2d = rand(RB_dist, nval)  # 2×nval
 X_val = reshape(X_val_2d, 1, 1, 2, nval)
 Y_val = X_val + args["sigma"] * randn(Float32, 1, 1, 2, nval)
