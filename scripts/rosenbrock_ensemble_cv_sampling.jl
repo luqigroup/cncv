@@ -14,12 +14,13 @@ using Rosenbrock
 using JLD2
 using PyPlot
 using Seaborn
+using Distributions
 
 # Import ensemble functions
 import CNCV: forward
 
 # Random seed
-Random.seed!(123)
+# Random.seed!(123)
 
 font_prop = set_plot_configs()[1]
 args = read_config("rosenbrock_ensemble_cv_sampling.json")
@@ -66,20 +67,65 @@ println("Observation noise σ: ", σ_obs)
 println("\n=== Generating Test Data ===")
 RB_dist = RosenbrockDistribution(0.0f0, 5.0f-1)
 
-# Sample from Rosenbrock prior
-X_test = rand(RB_dist, test_size)
-
-# Generate observation (using first sample as "true" parameter)
-X_true = X_test[:, 1]
+# Sample one true parameter from prior
+X_true = rand(RB_dist, 1)[:, 1]
 Y_obs = X_true + σ_obs * randn(Float32, 2)
 
 println("True parameter X: ", X_true')
 println("Observation Y: ", Y_obs')
 
-# For inference, we need samples from the POSTERIOR p(X|Y)
-# For Rosenbrock, we don't have analytical posterior, so we use MCMC samples
-# For now, use prior samples conditioned on the observation via likelihood weighting
-# (This is approximate but allows us to test the CV performance)
+# Generate POSTERIOR samples p(X|Y) conditioned on Y_obs
+println("\n=== Generating Posterior Samples ===")
+
+if args["learned_score"] != 0
+    println("Using pretrained amortized model to generate posterior samples...")
+    # Use amortized variational inference to generate posterior samples
+    Y_obs_net = reshape(Y_obs, 1, 1, 2, 1)
+    Y_test_net = repeat(Y_obs_net, 1, 1, 1, test_size)
+
+    # Sample from standard Gaussian in latent space
+    Zx = randn(Float32, 1, 1, 2, test_size)
+
+    # Transform through the network conditioned on Y_obs
+    Zy_fixed = G_amortized.forward(Zx, Y_test_net)[2]
+    X_test_net = G_amortized.inverse(Zx, Zy_fixed)
+
+    # Reshape to 2×test_size
+    X_test = reshape(X_test_net, 2, test_size)
+    println("Generated ", test_size, " posterior samples using amortized model")
+else
+    println("Using MCMC to generate posterior samples...")
+    # Use MCMC (SGLD) to sample from posterior
+    # Objective function for MCMC: -log p(x|y) = -log p(y|x) - log p(x) + const
+    obj(x, y) = begin
+        # Reshape x from 1×1×2×n to 2×n for Rosenbrock
+        x_2d = reshape(x, 2, size(x, 4))
+
+        data_term = (1.0f0 / (2.0f0 * σ_obs^2)) * sum((x - y) .^ 2.0f0)
+        # logpdf returns a vector, sum it up and negate
+        prior_term = -sum(logpdf(RB_dist, x_2d))
+
+        return data_term + prior_term
+    end
+
+    Y_obs_net = reshape(Y_obs, 1, 1, 2, 1)
+    f(x) = obj(x, Y_obs_net)
+
+    # Run MCMC sampler
+    max_itr = 20 * test_size
+    X_sgld = MCMC_sampler(
+        max_itr,
+        randn(Float32, 1, 1, 2, 1),
+        f;
+        lr = 5.0f0,
+        lr_final = 1.0f-1,
+        thinning = 10,
+    )
+
+    # Reshape to 2×test_size (remove first sample and extra dimension)
+    X_test = reshape(X_sgld[1, 1, :, 2:end], 2, test_size)
+    println("Generated ", test_size, " posterior samples using MCMC")
+end
 
 # Create conditioning: all samples observe the same Y
 Y_test = repeat(Y_obs, 1, test_size)
