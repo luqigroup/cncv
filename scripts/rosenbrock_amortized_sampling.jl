@@ -228,6 +228,158 @@ ax.set_title("Amortized variational inference")
 wsave(joinpath(save_path, "avi-samples.png"), fig)
 close(fig)
 
+# Likelihood comparison plot
+# Compute log-likelihood using the network (exact_likelihood function)
+# For conditional network, we need to provide both X and Y
+# We'll use one of the fixed test cases for this comparison
+j_test = 1
+Y_test_fixed = repeat(Y_fixed[:, :, :, j_test:j_test], 1, 1, 1, test_size)
+loglike_G = exact_likelihood(G, X_post[:, :, :, :, j_test], Y_test_fixed)
+
+# Compute true log-likelihood: log p(x|y) = log p(y|x) + log p(x) - log p(y)
+# Since log p(y) is constant for a fixed y, we can ignore it
+# log p(x|y) ∝ log p(y|x) + log p(x)
+# log p(y|x) = -0.5 * ||y - x||^2 / sigma^2 - log(sqrt(2*pi)*sigma) * dim
+# log p(x) = logpdf(RB_dist, x)
+
+# Reshape for Rosenbrock distribution
+X_post_2d = reshape(X_post[:, :, :, :, j_test], 2, test_size)
+
+# Compute log p(x) - prior
+loglike_prior = logpdf(RB_dist, X_post_2d)
+
+# Compute log p(y|x) - likelihood
+data_diff = X_post[:, :, :, :, j_test] - Y_test_fixed
+loglike_data = -0.5f0 .* sum(data_diff .^ 2, dims = [1, 2, 3])[1, 1, 1, :] ./ (args["sigma"]^2)
+# Add normalization constant
+dim = 2
+loglike_data = loglike_data .- dim * log(sqrt(2.0f0 * π) * args["sigma"])
+
+# Total true log-likelihood (up to constant)
+loglike_true = loglike_prior + loglike_data
+
+# Compute KL divergence + constant
+kl_divergence = mean(loglike_true - loglike_G)
+println("KL divergence + const. (test case $j_test): ", kl_divergence)
+
+# Create histogram comparison plot
+fig = figure("histogram", figsize = (7, 2.5))
+ax = histplot(
+    loglike_true,
+    kde = true,
+    bins = 50,
+    label = "true log-likelihood",
+    alpha = 0.8,
+    color = "#ff8800",
+)
+histplot(
+    loglike_G,
+    kde = true,
+    bins = 50,
+    label = "predicted log-likelihood",
+    alpha = 0.8,
+    color = "#00b4ba",
+)
+for label in ax.get_xticklabels()
+    label.set_fontproperties(font_prop)
+end
+for label in ax.get_yticklabels()
+    label.set_fontproperties(font_prop)
+end
+ax.set_xlabel("Log-likelihood", fontproperties = font_prop)
+ax.legend(prop = font_prop)
+wsave(joinpath(save_path, "log-like-hist.png"), fig)
+close(fig)
+
+# Gradient comparison plot (score function sanity check)
+# Compare learned gradlogpdf from network vs true analytical gradlogpdf
+println("Computing score function comparison...")
+
+# Use the same test case for gradient comparison
+j_test = 1
+Y_test_fixed = repeat(Y_fixed[:, :, :, j_test:j_test], 1, 1, 1, test_size)
+X_test_subset = X_post[:, :, :, :, j_test]
+
+# Compute LEARNED gradlogpdf using network's exact_score function
+ΔX_learned = exact_score(G, X_test_subset, Y_test_fixed)  # This is ∇ log p(x|y)
+
+# Compute TRUE gradlogpdf using analytical formulas
+# ∇ log p(x|y) = ∇ log p(y|x) + ∇ log p(x)
+X_test_2d = reshape(X_test_subset, 2, test_size)
+Y_test_2d = reshape(Y_test_fixed, 2, test_size)
+
+# Gradient of Gaussian likelihood: ∇ log p(y|x) = -(x-y)/σ²
+grad_likelihood = -(X_test_2d .- Y_test_2d) ./ (args["sigma"]^2)
+
+# Gradient of Rosenbrock prior
+grad_prior = gradlogpdf(RB_dist, X_test_2d)
+
+# Total true gradient
+grad_true = grad_likelihood .+ grad_prior
+
+# Reshape learned gradient for comparison
+grad_learned = reshape(ΔX_learned, 2, test_size)
+
+# Create component-wise scatter plots comparing learned vs true gradients
+fig = figure("gradient comparison", figsize = (12, 5))
+
+# Component 1
+subplot(1, 2, 1)
+scatter(grad_true[1, :], grad_learned[1, :], s = 2, alpha = 0.5, color = "#00b4ba")
+ref_line_vals = range(minimum(grad_true[1, :]), maximum(grad_true[1, :]), length = 100)
+plot(ref_line_vals, ref_line_vals, "k--", linewidth = 2, label = "y=x")
+xlabel("True ∇log p(x₁|y)", fontproperties = font_prop)
+ylabel("Learned ∇log p(x₁|y)", fontproperties = font_prop)
+title("Component 1: Score Function", fontproperties = font_prop)
+legend(prop = font_prop)
+grid(true, alpha = 0.3)
+axis("equal")
+
+# Component 2
+subplot(1, 2, 2)
+scatter(grad_true[2, :], grad_learned[2, :], s = 2, alpha = 0.5, color = "#ff8800")
+ref_line_vals = range(minimum(grad_true[2, :]), maximum(grad_true[2, :]), length = 100)
+plot(ref_line_vals, ref_line_vals, "k--", linewidth = 2, label = "y=x")
+xlabel("True ∇log p(x₂|y)", fontproperties = font_prop)
+ylabel("Learned ∇log p(x₂|y)", fontproperties = font_prop)
+title("Component 2: Score Function", fontproperties = font_prop)
+legend(prop = font_prop)
+grid(true, alpha = 0.3)
+axis("equal")
+
+tight_layout()
+wsave(joinpath(save_path, "gradient-comparison.png"), fig)
+close(fig)
+
+# Create 2D overlay plot: gradient vectors in 2D space
+fig = figure("gradient field 2D", figsize = (7, 7))
+ax = fig.add_subplot(111)
+
+# Plot true gradients
+scatter(grad_true[1, :], grad_true[2, :], s = 3, alpha = 0.4,
+        color = "#ff8800", marker = "o", label = "True ∇log p(x|y)")
+
+# Plot learned gradients
+scatter(grad_learned[1, :], grad_learned[2, :], s = 3, alpha = 0.4,
+        color = "#00b4ba", marker = "^", label = "Learned ∇log p(x|y)")
+
+xlabel("∇log p(x₁|y)", fontproperties = font_prop)
+ylabel("∇log p(x₂|y)", fontproperties = font_prop)
+title("Score Function: True vs Learned", fontproperties = font_prop)
+legend(prop = font_prop)
+grid(true, alpha = 0.3)
+axis("equal")
+
+tight_layout()
+wsave(joinpath(save_path, "gradient-field-2d.png"), fig)
+close(fig)
+
+# Print correlation between learned and true gradients
+for i in 1:2
+    corr = cor(grad_true[i, :], grad_learned[i, :])
+    println("Component $i gradient correlation: ", round(corr, digits=4))
+end
+
 rc("font", family = "serif", size = 16)
 font_prop =
     matplotlib.font_manager.FontProperties(family = "serif", style = "normal", size = 18)
