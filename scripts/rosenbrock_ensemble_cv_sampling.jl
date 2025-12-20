@@ -35,8 +35,10 @@ save_path = plotsdir(args["sim_name"], savename(args))
 # Conditionally load pretrained amortized model for learned likelihood
 if args["learned_score"] != 0
     println("Loading pretrained amortized model for learned log-likelihood...")
-    amortized_args = read_config("rosenbrock_amortized_training.json")
-    amortized_args["epoch"] = -1  # Load final epoch
+    amortized_args = read_config("rosenbrock_amortized_sampling.json")
+    if amortized_args["epoch"] == -1
+        amortized_args["epoch"] = amortized_args["max_epoch"]
+    end
     loaded_amortized = load_experiment(amortized_args, ["G"])
     G_amortized = loaded_amortized["G"]
     println("Loaded amortized model successfully!")
