@@ -171,7 +171,7 @@ def create_random_split_ensemble(
         EnsembleDenseCV with n_ensemble_members layers
     """
     if activation is None:
-        activation = nn.ReLU()
+        activation = nn.Tanh()
 
     # Set random seed if provided for reproducible splits
     if seed is not None:

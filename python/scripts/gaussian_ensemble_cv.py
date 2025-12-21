@@ -453,15 +453,16 @@ class GaussianEnsembleCV:
             )
 
         # Variance reduction analysis
-        self.analyze_variance_reduction(X_samples, g_combined, mu_post, args)
+        self.analyze_variance_reduction(X_samples, g_combined, all_g, mu_post, args)
 
         # Generate plots
-        self.plot_results(args)
+        self.plot_results(args, X_samples, g_combined, all_g)
 
     def analyze_variance_reduction(
         self,
         X_samples: torch.Tensor,
         g_combined: torch.Tensor,
+        all_g: list,
         true_mean: torch.Tensor,
         args: argparse.Namespace,
     ) -> None:
@@ -469,7 +470,8 @@ class GaussianEnsembleCV:
 
         Args:
             X_samples: Posterior samples [num_samples, n_dim]
-            g_combined: Control variates [n_dim, num_samples]
+            g_combined: Combined control variates [n_dim, num_samples]
+            all_g: List of individual layer CVs [n_ensemble_members, n_dim, num_samples]
             true_mean: Ground truth posterior mean [n_dim]
             args: Configuration
         """
@@ -482,6 +484,10 @@ class GaussianEnsembleCV:
         cv_mse = np.zeros((len(sample_sizes), self.n_dim))
 
         h_x = X_samples  # Quantity of interest: identity
+
+        # Store individual layer CVs for plotting
+        self.all_g = all_g
+        self.true_mean = true_mean
 
         for idx, n in enumerate(sample_sizes):
             vanilla_estimates = np.zeros((num_trials, self.n_dim))
@@ -525,11 +531,20 @@ class GaussianEnsembleCV:
         self.vanilla_mse = vanilla_mse
         self.cv_mse = cv_mse
 
-    def plot_results(self, args: argparse.Namespace) -> None:
+    def plot_results(
+        self,
+        args: argparse.Namespace,
+        X_samples: torch.Tensor,
+        g_combined: torch.Tensor,
+        all_g: list,
+    ) -> None:
         """Generate evaluation plots.
 
         Args:
             args: Configuration arguments
+            X_samples: Posterior samples [num_samples, n_dim]
+            g_combined: Combined control variates [n_dim, num_samples]
+            all_g: List of individual layer CVs
         """
         print(f"\n=== Generating Plots ===")
         print(f"Plot directory: {plotsdir(args.experiment)}")
@@ -624,7 +639,291 @@ class GaussianEnsembleCV:
         print(f"Saved {save_path}")
         plt.close()
 
+        # 3. Estimator distributions (violin plots)
+        self.plot_estimator_distributions(args, X_samples, g_combined)
+
+        # 4. VRF vs sample size
+        self.plot_vrf_vs_sample_size(args)
+
+        # 5. Variance comparison (bar charts)
+        self.plot_variance_comparison(args, X_samples, g_combined)
+
+        # 6. Scatter plots (h vs g_cv)
+        self.plot_scatter_h_vs_gcv(args, X_samples, g_combined, all_g)
+
         print("\n=== Evaluation Complete ===")
+
+    def plot_estimator_distributions(
+        self,
+        args: argparse.Namespace,
+        X_samples: torch.Tensor,
+        g_combined: torch.Tensor,
+    ) -> None:
+        """Plot violin plots comparing Vanilla MC vs Ensemble CV distributions.
+
+        Args:
+            args: Configuration arguments
+            X_samples: Posterior samples [num_samples, n_dim]
+            g_combined: Combined control variates [n_dim, num_samples]
+        """
+        sample_size = 100
+        n_trials = 200
+
+        h_x = X_samples
+
+        # Collect estimates
+        vanilla_estimates = np.zeros((n_trials, self.n_dim))
+        cv_estimates = np.zeros((n_trials, self.n_dim))
+
+        for trial in range(n_trials):
+            indices = torch.randperm(X_samples.shape[0])[:sample_size]
+
+            # Vanilla MC
+            vanilla_estimates[trial] = h_x[indices].mean(dim=0).cpu().numpy()
+
+            # CV estimator
+            cv_residual = h_x[indices].T - g_combined[:, indices]
+            cv_estimates[trial] = (cv_residual.mean(dim=1) + self.mu).cpu().numpy()
+
+        # Create violin plots
+        fig, axes = plt.subplots(1, self.n_dim, figsize=(10, 5))
+        if self.n_dim == 1:
+            axes = [axes]
+
+        for i in range(self.n_dim):
+            parts = axes[i].violinplot(
+                [vanilla_estimates[:, i], cv_estimates[:, i]],
+                positions=[1, 2],
+                showmeans=True,
+                showextrema=True,
+            )
+
+            # Color the violins
+            for j, pc in enumerate(parts['bodies']):
+                if j == 0:
+                    pc.set_facecolor('#7f7f7f')
+                    pc.set_alpha(0.7)
+                else:
+                    pc.set_facecolor('#d62728')
+                    pc.set_alpha(0.7)
+
+            # Add ground truth line
+            truth = self.true_mean[i].cpu().numpy()
+            axes[i].axhline(truth, color='k', linestyle='--', linewidth=2, label='Ground truth')
+
+            # Compute VRF for this component
+            var_vanilla = vanilla_estimates[:, i].var()
+            var_cv = cv_estimates[:, i].var()
+            vrf = var_cv / var_vanilla
+            reduction_pct = (1.0 - vrf) * 100
+
+            # Add VRF annotation
+            axes[i].text(
+                0.5, 0.98,
+                f'VRF = {vrf:.3f}\nReduction = {reduction_pct:.1f}%',
+                transform=axes[i].transAxes,
+                verticalalignment='top',
+                horizontalalignment='center',
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5),
+                fontsize=9
+            )
+
+            axes[i].set_xticks([1, 2])
+            axes[i].set_xticklabels(['Vanilla MC', 'Ensemble CV'])
+            axes[i].set_ylabel('Estimate value')
+            axes[i].set_title(f'Component {i}')
+            axes[i].legend()
+            axes[i].grid(alpha=0.3, axis='y')
+
+        plt.suptitle(f'Estimator Distributions (n={sample_size}, {n_trials} trials)', fontsize=12)
+        plt.tight_layout()
+
+        save_path = os.path.join(plotsdir(args.experiment), "estimator_distributions.png")
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        print(f"Saved {save_path}")
+        plt.close()
+
+    def plot_vrf_vs_sample_size(self, args: argparse.Namespace) -> None:
+        """Plot Variance Reduction Factor vs sample size.
+
+        Args:
+            args: Configuration arguments
+        """
+        # Compute VRF for each sample size
+        vrf = self.cv_mse / self.vanilla_mse
+
+        fig, axes = plt.subplots(1, self.n_dim, figsize=(10, 5))
+        if self.n_dim == 1:
+            axes = [axes]
+
+        for i in range(self.n_dim):
+            axes[i].plot(
+                self.sample_sizes,
+                vrf[:, i],
+                'o-',
+                linewidth=2,
+                markersize=6,
+                color='#d62728',
+                label='VRF'
+            )
+
+            # Reference line at VRF = 1.0 (no reduction)
+            axes[i].axhline(1.0, color='k', linestyle='--', linewidth=1.5, alpha=0.5, label='No reduction')
+
+            axes[i].set_xlabel('Sample size')
+            axes[i].set_ylabel('Variance Reduction Factor')
+            axes[i].set_title(f'Component {i}')
+            axes[i].set_xscale('log')
+            axes[i].legend()
+            axes[i].grid(alpha=0.3)
+
+        plt.suptitle('Variance Reduction Factor vs Sample Size', fontsize=12)
+        plt.tight_layout()
+
+        save_path = os.path.join(plotsdir(args.experiment), "vrf_vs_sample_size.png")
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        print(f"Saved {save_path}")
+        plt.close()
+
+    def plot_variance_comparison(
+        self,
+        args: argparse.Namespace,
+        X_samples: torch.Tensor,
+        g_combined: torch.Tensor,
+    ) -> None:
+        """Plot bar chart comparing Var[Vanilla] vs Var[CV].
+
+        Args:
+            args: Configuration arguments
+            X_samples: Posterior samples [num_samples, n_dim]
+            g_combined: Combined control variates [n_dim, num_samples]
+        """
+        sample_size = 100
+        n_trials = 500
+
+        h_x = X_samples
+
+        # Collect estimates
+        vanilla_estimates = np.zeros((n_trials, self.n_dim))
+        cv_estimates = np.zeros((n_trials, self.n_dim))
+
+        for trial in range(n_trials):
+            indices = torch.randperm(X_samples.shape[0])[:sample_size]
+
+            # Vanilla MC
+            vanilla_estimates[trial] = h_x[indices].mean(dim=0).cpu().numpy()
+
+            # CV estimator
+            cv_residual = h_x[indices].T - g_combined[:, indices]
+            cv_estimates[trial] = (cv_residual.mean(dim=1) + self.mu).cpu().numpy()
+
+        # Compute variances
+        var_vanilla = vanilla_estimates.var(axis=0)
+        var_cv = cv_estimates.var(axis=0)
+
+        # Create bar charts
+        fig, axes = plt.subplots(1, self.n_dim, figsize=(10, 5))
+        if self.n_dim == 1:
+            axes = [axes]
+
+        x = np.arange(2)
+        width = 0.6
+
+        for i in range(self.n_dim):
+            bars = axes[i].bar(
+                x,
+                [var_vanilla[i], var_cv[i]],
+                width,
+                color=['#7f7f7f', '#d62728'],
+                alpha=0.7
+            )
+
+            # Compute VRF
+            vrf = var_cv[i] / var_vanilla[i]
+            reduction_pct = (1.0 - vrf) * 100
+
+            # Add VRF annotation
+            axes[i].text(
+                0.5, 0.98,
+                f'VRF = {vrf:.3f}\nReduction = {reduction_pct:.1f}%',
+                transform=axes[i].transAxes,
+                verticalalignment='top',
+                horizontalalignment='center',
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5),
+                fontsize=10
+            )
+
+            axes[i].set_xticks(x)
+            axes[i].set_xticklabels(['Vanilla MC', 'Ensemble CV'])
+            axes[i].set_ylabel('Variance')
+            axes[i].set_title(f'Component {i}')
+            axes[i].grid(alpha=0.3, axis='y')
+
+        plt.suptitle(f'Variance Comparison (n={sample_size}, {n_trials} trials)', fontsize=12)
+        plt.tight_layout()
+
+        save_path = os.path.join(plotsdir(args.experiment), "variance_comparison.png")
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        print(f"Saved {save_path}")
+        plt.close()
+
+    def plot_scatter_h_vs_gcv(
+        self,
+        args: argparse.Namespace,
+        X_samples: torch.Tensor,
+        g_combined: torch.Tensor,
+        all_g: list,
+    ) -> None:
+        """Plot 2x3 grid of scatter plots: h vs g for each layer + combined.
+
+        Args:
+            args: Configuration arguments
+            X_samples: Posterior samples [num_samples, n_dim]
+            g_combined: Combined control variates [n_dim, num_samples]
+            all_g: List of individual layer CVs
+        """
+        h_x = X_samples.cpu().numpy()  # [num_samples, n_dim]
+
+        # Create 2 rows (one per component) x 3 columns (layer1, layer2, combined) grid
+        n_layers = len(all_g)
+        fig, axes = plt.subplots(self.n_dim, n_layers + 1, figsize=(15, 8))
+
+        if self.n_dim == 1:
+            axes = axes.reshape(1, -1)
+
+        for i in range(self.n_dim):  # For each component
+            # Plot each layer's CV
+            for j, g_layer in enumerate(all_g):
+                g_layer_np = g_layer[i, :].cpu().numpy()
+                axes[i, j].scatter(h_x[:, i], g_layer_np, s=1, alpha=0.5, color='#4a4a4a')
+
+                # Compute correlation
+                corr = np.corrcoef(h_x[:, i], g_layer_np)[0, 1]
+
+                axes[i, j].set_xlabel(f'h_{i}')
+                axes[i, j].set_ylabel(f'g_{i} (Layer {j+1})')
+                axes[i, j].set_title(f'Component {i}, Layer {j+1}\nCorr = {corr:.3f}')
+                axes[i, j].grid(alpha=0.3)
+
+            # Plot combined CV
+            g_combined_np = g_combined[i, :].cpu().numpy()
+            axes[i, n_layers].scatter(h_x[:, i], g_combined_np, s=1, alpha=0.5, color='#d62728')
+
+            # Compute correlation
+            corr_combined = np.corrcoef(h_x[:, i], g_combined_np)[0, 1]
+
+            axes[i, n_layers].set_xlabel(f'h_{i}')
+            axes[i, n_layers].set_ylabel(f'g_{i} (Combined)')
+            axes[i, n_layers].set_title(f'Component {i}, Combined\nCorr = {corr_combined:.3f}')
+            axes[i, n_layers].grid(alpha=0.3)
+
+        plt.suptitle('Correlation between h(x) and Control Variates', fontsize=14)
+        plt.tight_layout()
+
+        save_path = os.path.join(plotsdir(args.experiment), "scatter_h_vs_gcv.png")
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        print(f"Saved {save_path}")
+        plt.close()
 
 
 if "__main__" == __name__:
