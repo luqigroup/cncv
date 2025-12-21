@@ -1,0 +1,21 @@
+{
+    "experiment_name": "rosenbrock_ensemble_cv",
+    "max_epochs": 50,
+    "lr": 0.001,
+    "lr_final": 0.0001,
+    "rosenbrock_mu": 0.0,
+    "rosenbrock_a": 0.5,
+    "sigma": 0.3,
+    "batchsize": 256,
+    "n_hidden": 32,
+    "n_layers": 3,
+    "n_ensemble_members": 2,
+    "num_train": 65536,
+    "num_val": 2048,
+    "num_samples": 10000,
+    "save_freq": 50,
+    "gpu_id": 0,
+    "seed": 19,
+    "phase": "train",
+    "testing_epoch": -1
+}

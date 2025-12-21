@@ -13,6 +13,8 @@ from .models import (
 from .utils import (
     compute_score_posterior_gaussian,
     compute_exact_posterior,
+    RosenbrockDistribution,
+    compute_score_posterior_rosenbrock,
 )
 
 __version__ = "0.1.0"
@@ -24,4 +26,6 @@ __all__ = [
     "create_random_split_ensemble",
     "compute_score_posterior_gaussian",
     "compute_exact_posterior",
+    "RosenbrockDistribution",
+    "compute_score_posterior_rosenbrock",
 ]
