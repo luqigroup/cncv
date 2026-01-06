@@ -1,8 +1,8 @@
-"""Rosenbrock ensemble CV example.
+"""Gaussian ensemble CV example.
 
 This script trains and evaluates an ensemble of coupling layers with forward
 and reverse splits to learn control variates for variance reduction in Bayesian
-posterior estimation with Rosenbrock prior.
+posterior estimation.
 
 Authors: Claude Code (translation from Julia)
 Date: December 2024
@@ -10,7 +10,6 @@ Date: December 2024
 
 import argparse
 import os
-import sys
 import torch
 import torch.nn as nn
 import numpy as np
@@ -21,26 +20,27 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from projorg import checkpointsdir, plotsdir, setup_environment
 
-# Add src to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-
 from cncv import (
+    create_forward_reverse_ensemble,
     create_random_split_ensemble,
-    RosenbrockDistribution,
-    compute_score_posterior_rosenbrock,
+    compute_score_posterior_gaussian,
+    compute_exact_posterior,
 )
-from cncv.utils import CustomLRScheduler, pSGLD
+from cncv.utils import CustomLRScheduler
 
-CONFIG_FILE = "rosenbrock_ensemble_cv.json"
+CONFIG_FILE = "gaussian_ensemble_cv.json"
 
 
-class RosenbrockEnsembleCV:
-    """Rosenbrock ensemble CV for variance reduction in Bayesian inference.
+class GaussianEnsembleCV:
+    """Gaussian ensemble CV for variance reduction in Bayesian inference.
 
     Attributes:
         device: Computation device (CPU/CUDA)
-        n_dim: Problem dimension (always 2 for Rosenbrock)
-        rosenbrock_dist: Rosenbrock prior distribution
+        n_dim: Problem dimension
+        mu_prior: Prior mean
+        Sigma_prior: Prior covariance
+        L_prior: Cholesky decomposition of prior covariance
+        Sigma_prior_inv: Inverse prior covariance
         sigma: Observation noise std
         ensemble: Ensemble neural network
         mu: Learnable offsets
@@ -55,7 +55,7 @@ class RosenbrockEnsembleCV:
     """
 
     def __init__(self, args: argparse.Namespace) -> None:
-        """Initialize Rosenbrock ensemble CV.
+        """Initialize Gaussian ensemble CV.
 
         Args:
             args: Configuration arguments from projorg
@@ -68,19 +68,22 @@ class RosenbrockEnsembleCV:
 
         print(f"Using device: {self.device}")
 
-        # Problem setup - Rosenbrock is 2D
+        # Problem setup
         self.n_dim = 2
-
-        # Create Rosenbrock distribution
-        self.rosenbrock_dist = RosenbrockDistribution(
-            mu=args.rosenbrock_mu, a=args.rosenbrock_a
+        self.mu_prior = torch.zeros(
+            self.n_dim, dtype=torch.float32, device=self.device
         )
+        self.Sigma_prior = torch.tensor(
+            [[2.0, 0.5], [0.5, 1.0]], dtype=torch.float32, device=self.device
+        )
+        self.L_prior = torch.linalg.cholesky(self.Sigma_prior)
+        self.Sigma_prior_inv = torch.linalg.inv(self.Sigma_prior)
         self.sigma = float(args.sigma)
 
         print("\n=== Problem Setup ===")
         print(f"Dimension: {self.n_dim}")
-        print(f"Rosenbrock μ: {self.rosenbrock_dist.mu}")
-        print(f"Rosenbrock a: {self.rosenbrock_dist.a}")
+        print(f"Prior mean: {self.mu_prior}")
+        print(f"Prior covariance:\n{self.Sigma_prior}")
         print(f"Observation noise σ: {self.sigma}")
 
         # Create ensemble
@@ -137,18 +140,19 @@ class RosenbrockEnsembleCV:
         print(f"Training samples: {args.num_train}")
         print(f"Validation samples: {args.num_val}")
 
-        # Sample from Rosenbrock prior
-        self.X_train = self.rosenbrock_dist.sample(
-            args.num_train, device=self.device
+        noise = torch.randn(
+            args.num_train, self.n_dim, dtype=torch.float32, device=self.device
         )
+        self.X_train = self.mu_prior + (self.L_prior @ noise.T).T
         self.Y_train = self.X_train + self.sigma * torch.randn_like(
             self.X_train
         )
 
         # Validation data
-        self.X_val = self.rosenbrock_dist.sample(
-            args.num_val, device=self.device
+        noise_val = torch.randn(
+            args.num_val, self.n_dim, dtype=torch.float32, device=self.device
         )
+        self.X_val = self.mu_prior + (self.L_prior @ noise_val.T).T
         self.Y_val = self.X_val + self.sigma * torch.randn_like(self.X_val)
 
         # Logging
@@ -188,9 +192,9 @@ class RosenbrockEnsembleCV:
         self.val_obj = checkpoint["val_obj"]
 
         # Restore problem parameters
-        self.rosenbrock_dist = RosenbrockDistribution(
-            mu=checkpoint["rosenbrock_mu"], a=checkpoint["rosenbrock_a"]
-        )
+        self.mu_prior = checkpoint["mu_prior"].to(self.device)
+        self.Sigma_prior = checkpoint["Sigma_prior"].to(self.device)
+        self.Sigma_prior_inv = torch.linalg.inv(self.Sigma_prior)
         self.sigma = checkpoint["sigma"]
 
         if not args.testing_epoch == checkpoint["epoch"]:
@@ -215,9 +219,9 @@ class RosenbrockEnsembleCV:
         # Quantity of interest: h(x) = x
         h_x = X
 
-        # Compute score ∇log p(x|y) for Rosenbrock posterior
-        score = compute_score_posterior_rosenbrock(
-            X, Y, self.rosenbrock_dist, self.sigma
+        # Compute score ∇log p(x|y)
+        score = compute_score_posterior_gaussian(
+            X, Y, self.mu_prior, self.Sigma_prior_inv, self.sigma
         )
 
         # Forward through ensemble
@@ -289,8 +293,8 @@ class RosenbrockEnsembleCV:
                 for X, Y in batch_pbar:
                     # Forward pass
                     h_x = X
-                    score = compute_score_posterior_rosenbrock(
-                        X, Y, self.rosenbrock_dist, self.sigma
+                    score = compute_score_posterior_gaussian(
+                        X, Y, self.mu_prior, self.Sigma_prior_inv, self.sigma
                     )
                     g_combined, _ = self.ensemble(X, Y, score)
 
@@ -352,8 +356,8 @@ class RosenbrockEnsembleCV:
                             "args": args,
                             "train_obj": self.train_obj,
                             "val_obj": self.val_obj,
-                            "rosenbrock_mu": self.rosenbrock_dist.mu,
-                            "rosenbrock_a": self.rosenbrock_dist.a,
+                            "mu_prior": self.mu_prior.cpu(),
+                            "Sigma_prior": self.Sigma_prior.cpu(),
                             "sigma": self.sigma,
                         },
                         os.path.join(
@@ -366,103 +370,6 @@ class RosenbrockEnsembleCV:
         print(f"Final training loss: {self.train_obj[-1]:.6f}")
         print(f"Final validation loss: {self.val_obj[-1]:.6f}")
         print(f"Learned offsets μ: {self.mu.detach().cpu().numpy()}")
-
-    def sample_posterior_psgld(
-        self, Y_obs: torch.Tensor, num_samples: int, args: argparse.Namespace
-    ) -> torch.Tensor:
-        """Sample from posterior using pSGLD with polynomial LR decay.
-
-        Matches Julia implementation from src/sampling/sample.jl:
-        - Total iterations: 20 * num_samples
-        - Burnin: First half of iterations (10 * num_samples)
-        - Thinning: Keep every 10th sample after burnin
-        - LR schedule: Polynomial decay from 5.0 to 0.1 with gamma=-1/3
-
-        Args:
-            Y_obs: Observation [n_dim]
-            num_samples: Number of samples to generate (default: 10000)
-            args: Configuration
-
-        Returns:
-            samples: Posterior samples [num_samples, n_dim]
-        """
-        # pSGLD hyperparameters matching Julia
-
-        lr_initial = 0.1
-        lr_final = 0.01
-        thinning = 1
-        max_itr = 2 * num_samples  # Total iterations before burnin/thinning
-
-        lr_scheduler = CustomLRScheduler(
-            self.optimizer,
-            initial_lr=lr_initial,
-            final_lr=lr_final,
-            max_step=max_itr,
-        )
-
-        # Initialize from prior
-        x = self.rosenbrock_dist.sample(1, device=self.device).squeeze()
-        x.requires_grad_(True)
-
-        # Create optimizer with initial LR
-        optimizer = pSGLD([x], lr=lr_initial)
-
-        # Collect ALL samples during MCMC (will remove burnin later)
-        all_samples = []
-
-        print(f"Running pSGLD for {max_itr} iterations...")
-        print(
-            f"LR schedule: {lr_initial:.2f} → {lr_final:.2f} (polynomial decay, γ=-1/3)"
-        )
-
-        with tqdm(range(max_itr), unit="epoch", colour="#B5F2A9") as pbar:
-            for itr in pbar:
-                # Compute negative log posterior (energy)
-                # -log p(x|y) = -log p(y|x) - log p(x) + const
-
-                # Negative log likelihood: 0.5 * ||y - x||^2 / sigma^2
-                neg_log_likelihood = (
-                    0.5 * ((Y_obs - x) ** 2).sum() / (self.sigma**2)
-                )
-
-                # Negative log prior: -log p(x)
-                neg_log_prior = -self.rosenbrock_dist.logpdf(
-                    x.unsqueeze(0)
-                ).squeeze()
-
-                # Total energy
-                energy = neg_log_likelihood + neg_log_prior
-
-                # Backward pass
-                optimizer.zero_grad()
-                energy.backward()
-                lr_scheduler.step()
-
-                # pSGLD step
-                optimizer.step()
-
-                # Store sample (will filter later)
-                all_samples.append(x.detach().clone())
-
-                pbar.set_postfix({"energy": f"{energy:.6f}"})
-
-        # Convert to tensor
-        all_samples = torch.stack(all_samples)  # [max_itr, n_dim]
-
-        # Burnin: Remove first half of iterations (matching Julia line 44)
-        burnin_iters = max_itr // 2
-        samples_after_burnin = all_samples[burnin_iters:]  # Keep second half
-
-        print(f"Removed first {burnin_iters} iterations (burnin)")
-        print(f"Remaining: {len(samples_after_burnin)} samples")
-
-        # Thinning: Keep every 10th sample (matching Julia line 47)
-        samples_thinned = samples_after_burnin[::thinning]  # Keep every 10th
-
-        print(f"Applied thinning (keep every {thinning}th sample)")
-        print(f"Final: {len(samples_thinned)} posterior samples")
-
-        return samples_thinned
 
     def test(self, args: argparse.Namespace) -> None:
         """Evaluate variance reduction on test data.
@@ -478,8 +385,10 @@ class RosenbrockEnsembleCV:
 
         print("\n=== Generating Test Data ===")
 
-        # Create a fixed observation (sample one point and add noise)
-        X_true = self.rosenbrock_dist.sample(1, device=self.device)[0]
+        # Generate test observation
+        X_true = self.mu_prior + self.L_prior @ torch.randn(
+            self.n_dim, device=self.device
+        )
         Y_obs = X_true + self.sigma * torch.randn(
             self.n_dim, device=self.device
         )
@@ -487,23 +396,33 @@ class RosenbrockEnsembleCV:
         print(f"True parameter X: {X_true}")
         print(f"Observation Y: {Y_obs}")
 
-        # Sample from posterior using pSGLD (MCMC)
+        # Compute exact posterior
+        mu_post, Sigma_post = compute_exact_posterior(
+            Y_obs, self.mu_prior, self.Sigma_prior, self.sigma
+        )
+
+        print("\n=== Exact Posterior (Analytical) ===")
+        print(f"Posterior mean: {mu_post}")
+        print(f"Posterior covariance:\n{Sigma_post}")
+
+        # Sample from exact posterior
         num_samples = args.num_samples
-        print(f"\nSampling {num_samples} from posterior using pSGLD...")
+        print(f"\nSampling {num_samples} from exact posterior...")
 
-        X_samples = self.sample_posterior_psgld(Y_obs, num_samples, args)
-
-        print(f"Posterior samples mean: {X_samples.mean(dim=0)}")
-        print(f"Posterior samples std: {X_samples.std(dim=0)}")
-
-        # Y_obs is the same for all samples
+        L_post = torch.linalg.cholesky(Sigma_post)
+        noise = torch.randn(num_samples, self.n_dim, device=self.device)
+        X_samples = mu_post + (L_post @ noise.T).T
         Y_samples = Y_obs.repeat(num_samples, 1)
 
         # Compute control variates
         print("\n=== Computing Control Variates ===")
         with torch.no_grad():
-            score = compute_score_posterior_rosenbrock(
-                X_samples, Y_samples, self.rosenbrock_dist, self.sigma
+            score = compute_score_posterior_gaussian(
+                X_samples,
+                Y_samples,
+                self.mu_prior,
+                self.Sigma_prior_inv,
+                self.sigma,
             )
             g_combined, all_g = self.ensemble(X_samples, Y_samples, score)
 
@@ -529,16 +448,9 @@ class RosenbrockEnsembleCV:
                 f"  Component {k}: |E[g_{k}]| / Std[g_{k}] = {ratio:.4f} (should be << 1)"
             )
 
-        # For variance reduction analysis, use posterior samples mean as "true" value
-        # (Since we don't have analytical posterior for Rosenbrock)
-        posterior_mean = X_samples.mean(dim=0)
-
-        # Plot posterior vs prior distributions
-        self.plot_posterior_vs_prior(X_samples, args)
-
         # Variance reduction analysis
         self.analyze_variance_reduction(
-            X_samples, g_combined, all_g, posterior_mean, args
+            X_samples, g_combined, all_g, mu_post, args
         )
 
         # Generate plots
@@ -557,7 +469,7 @@ class RosenbrockEnsembleCV:
         Args:
             X_samples: Posterior samples [num_samples, n_dim]
             g_combined: Combined control variates [n_dim, num_samples]
-            all_g: List of individual layer CVs
+            all_g: List of individual layer CVs [n_ensemble_members, n_dim, num_samples]
             true_mean: Ground truth posterior mean [n_dim]
             args: Configuration
         """
@@ -617,66 +529,6 @@ class RosenbrockEnsembleCV:
         self.vanilla_mse = vanilla_mse
         self.cv_mse = cv_mse
 
-    def plot_posterior_vs_prior(
-        self, X_posterior: torch.Tensor, args: argparse.Namespace
-    ) -> None:
-        """Plot posterior samples overlaid on prior samples.
-
-        Args:
-            X_posterior: Posterior samples from pSGLD [num_samples, n_dim]
-            args: Configuration
-        """
-        print("\n=== Generating Posterior vs Prior Plot ===")
-
-        # Generate prior samples (same number as posterior)
-        num_samples = X_posterior.shape[0]
-        X_prior = self.rosenbrock_dist.sample(num_samples, device=self.device)
-
-        # Convert to numpy for plotting
-        X_prior_np = X_prior.cpu().numpy()
-        X_posterior_np = X_posterior.cpu().numpy()
-
-        # Create plot
-        fig, ax = plt.subplots(figsize=(6, 6))
-        ax.patch.set_facecolor("white")
-
-        # Plot prior samples (black, low alpha)
-        ax.scatter(
-            X_prior_np[:, 0],
-            X_prior_np[:, 1],
-            s=0.5,
-            color="#000000",
-            alpha=0.15,
-            label="Prior samples",
-        )
-
-        # Plot posterior samples (red, higher alpha)
-        ax.scatter(
-            X_posterior_np[:, 0],
-            X_posterior_np[:, 1],
-            s=1.0,
-            color="#d62728",
-            alpha=0.3,
-            label="Posterior samples (pSGLD)",
-        )
-
-        ax.set_xlim([-3, 3])
-        ax.set_ylim([-2.5, 7])
-        ax.set_xlabel("$x_1$")
-        ax.set_ylabel("$x_2$")
-        ax.set_title("Rosenbrock: Posterior vs Prior Distributions")
-        ax.legend(loc="upper right")
-        ax.grid(False)
-
-        plt.tight_layout()
-
-        save_path = os.path.join(
-            plotsdir(args.experiment), "posterior_vs_prior.png"
-        )
-        plt.savefig(save_path, dpi=300, bbox_inches="tight")
-        print(f"Saved {save_path}")
-        plt.close()
-
     def plot_results(
         self,
         args: argparse.Namespace,
@@ -684,7 +536,7 @@ class RosenbrockEnsembleCV:
         g_combined: torch.Tensor,
         all_g: list,
     ) -> None:
-        """Generate evaluation plots (all 6 plots from Gaussian version).
+        """Generate evaluation plots.
 
         Args:
             args: Configuration arguments
@@ -720,7 +572,7 @@ class RosenbrockEnsembleCV:
 
         ax.set_xlabel("Epochs")
         ax.set_ylabel("MSE Loss")
-        ax.set_title("Training Objective (Rosenbrock)")
+        ax.set_title("Training Objective")
         ax.legend()
         ax.grid(alpha=0.3)
         plt.tight_layout()
@@ -785,16 +637,16 @@ class RosenbrockEnsembleCV:
         print(f"Saved {save_path}")
         plt.close()
 
-        # 3. Estimator distributions
+        # 3. Estimator distributions (violin plots)
         self.plot_estimator_distributions(args, X_samples, g_combined)
 
         # 4. VRF vs sample size
         self.plot_vrf_vs_sample_size(args)
 
-        # 5. Variance comparison
+        # 5. Variance comparison (bar charts)
         self.plot_variance_comparison(args, X_samples, g_combined)
 
-        # 6. Scatter plots
+        # 6. Scatter plots (h vs g_cv)
         self.plot_scatter_h_vs_gcv(args, X_samples, g_combined, all_g)
 
         print("\n=== Evaluation Complete ===")
@@ -805,7 +657,13 @@ class RosenbrockEnsembleCV:
         X_samples: torch.Tensor,
         g_combined: torch.Tensor,
     ) -> None:
-        """Plot violin plots comparing Vanilla MC vs Ensemble CV distributions."""
+        """Plot violin plots comparing Vanilla MC vs Ensemble CV distributions.
+
+        Args:
+            args: Configuration arguments
+            X_samples: Posterior samples [num_samples, n_dim]
+            g_combined: Combined control variates [n_dim, num_samples]
+        """
         sample_size = 100
         n_trials = 200
 
@@ -859,7 +717,7 @@ class RosenbrockEnsembleCV:
                 label="Ground truth",
             )
 
-            # Compute VRF
+            # Compute VRF for this component
             var_vanilla = vanilla_estimates[:, i].var()
             var_cv = cv_estimates[:, i].var()
             vrf = var_cv / var_vanilla
@@ -898,7 +756,11 @@ class RosenbrockEnsembleCV:
         plt.close()
 
     def plot_vrf_vs_sample_size(self, args: argparse.Namespace) -> None:
-        """Plot Variance Reduction Factor vs sample size."""
+        """Plot Variance Reduction Factor vs sample size.
+
+        Args:
+            args: Configuration arguments
+        """
         # Compute VRF for each sample size
         vrf = self.cv_mse / self.vanilla_mse
 
@@ -917,7 +779,7 @@ class RosenbrockEnsembleCV:
                 label="VRF",
             )
 
-            # Reference line at VRF = 1.0
+            # Reference line at VRF = 1.0 (no reduction)
             axes[i].axhline(
                 1.0,
                 color="k",
@@ -950,7 +812,13 @@ class RosenbrockEnsembleCV:
         X_samples: torch.Tensor,
         g_combined: torch.Tensor,
     ) -> None:
-        """Plot bar chart comparing Var[Vanilla] vs Var[CV]."""
+        """Plot bar chart comparing Var[Vanilla] vs Var[CV].
+
+        Args:
+            args: Configuration arguments
+            X_samples: Posterior samples [num_samples, n_dim]
+            g_combined: Combined control variates [n_dim, num_samples]
+        """
         sample_size = 100
         n_trials = 500
 
@@ -1035,10 +903,17 @@ class RosenbrockEnsembleCV:
         g_combined: torch.Tensor,
         all_g: list,
     ) -> None:
-        """Plot 2x3 grid of scatter plots: h vs g for each layer + combined."""
+        """Plot 2x3 grid of scatter plots: h vs g for each layer + combined.
+
+        Args:
+            args: Configuration arguments
+            X_samples: Posterior samples [num_samples, n_dim]
+            g_combined: Combined control variates [n_dim, num_samples]
+            all_g: List of individual layer CVs
+        """
         h_x = X_samples.cpu().numpy()  # [num_samples, n_dim]
 
-        # Create 2 rows (one per component) x N+1 columns (N layers + combined) grid
+        # Create 2 rows (one per component) x 3 columns (layer1, layer2, combined) grid
         n_layers = len(all_g)
         fig, axes = plt.subplots(self.n_dim, n_layers + 1, figsize=(15, 8))
 
@@ -1102,7 +977,6 @@ if "__main__" == __name__:
             "phase",
             "seed",
             "testing_epoch",
-            "num_samples",
         ],
     )
 
@@ -1116,11 +990,11 @@ if "__main__" == __name__:
         args.testing_epoch = args.max_epochs - 1
 
     # Create instance
-    rosenbrock_cv = RosenbrockEnsembleCV(args)
+    gaussian_cv = GaussianEnsembleCV(args)
 
     # Train or test based on phase
     if args.phase == "train":
-        rosenbrock_cv.train(args)
+        gaussian_cv.train(args)
 
     # Always run test (like in sips)
-    rosenbrock_cv.test(args)
+    gaussian_cv.test(args)

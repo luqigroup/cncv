@@ -1,11 +1,6 @@
 """Quick test script for ensemble implementation."""
 
-import sys
-import os
 import torch
-
-# Add src to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from cncv import (
     create_forward_reverse_ensemble,

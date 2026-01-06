@@ -3,12 +3,6 @@
 import pytest
 import torch
 import numpy as np
-import sys
-import os
-
-# Add src and tests to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
 
 from cncv.utils import (
     compute_score_posterior_gaussian,
@@ -16,7 +10,7 @@ from cncv.utils import (
     RosenbrockDistribution,
     compute_score_posterior_rosenbrock,
 )
-from utils import finite_diff_grad
+from tests.utils import finite_diff_grad
 
 
 class TestGaussianPosterior:

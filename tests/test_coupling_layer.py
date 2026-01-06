@@ -3,15 +3,9 @@
 import pytest
 import torch
 import numpy as np
-import sys
-import os
-
-# Add src and tests to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
 
 from cncv.models import DenseConditionalLayerCV_Reversible
-from utils import gradient_check_finite_diff, gradient_check_taylor
+from tests.utils import gradient_check_finite_diff, gradient_check_taylor
 
 
 class TestCouplingLayerGradients:

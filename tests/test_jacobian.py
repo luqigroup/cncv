@@ -3,15 +3,9 @@
 import pytest
 import torch
 import numpy as np
-import sys
-import os
-
-# Add src and tests to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
 
 from cncv.models import DenseConditionalLayerCV_Reversible
-from utils import finite_diff_jacobian
+from tests.utils import finite_diff_jacobian
 
 
 class TestJacobianTrace:
