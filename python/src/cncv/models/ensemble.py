@@ -114,7 +114,7 @@ def create_forward_reverse_ensemble(
         EnsembleDenseCV with two layers (forward and reverse splits)
     """
     if activation is None:
-        activation = nn.Tanh()
+        activation = nn.ReLU()
 
     # Layer 1: Transform first half (original)
     layer1 = DenseConditionalLayerCV_Reversible(
