@@ -1,28 +1,46 @@
-# CNCV - Conditional Neural Control Variates
+# `cncv` - Conditional Neural Control Variates
 
-A Python package implementing conditional neural control variates for variance reduction in Bayesian posterior mean estimation.
+A Python package implementing conditional neural control variates for variance reduction in Bayesian inference.
 
 ## Overview
 
-CNCV uses ensemble neural networks with coupling layers to construct control variates that reduce variance in Monte Carlo estimation of posterior means. The package includes implementations for Gaussian and Rosenbrock distributions.
+CNCV uses ensemble of coupling layers to construct control variates that
+reduce variance in Monte Carlo estimation of integrals with respect to
+posterior distributions in Bayesian inference.
 
 ## Installation
 
-### For development and running examples
+For development and running examplesm, clone the repository and install in editable mode:
 
 ```bash
 # Clone repository
-git clone https://github.com/luqigroup/CNCV.jl
-cd CNCV.jl
+git clone https://github.com/luqigroup/cncv
+cd cncv
 
 # Install in editable mode
 pip install -e .
 ```
 
-### For users (when published)
+## Project Structure
 
-```bash
-pip install cncv
+```
+cncv/
+├── cncv/                 # Main package
+│   ├── models/          # Coupling layers and ensemble models
+│   │   ├── coupling_layer.py
+│   │   └── ensemble.py
+│   └── utils/           # Distribution utilities and optimizers
+│       ├── gaussian.py
+│       ├── rosenbrock.py
+│       ├── psgld.py
+│       └── lr_scheduler.py
+├── scripts/             # Training and evaluation scripts
+│   ├── gaussian_ensemble_cv.py
+│   └── rosenbrock_ensemble_cv.py
+├── configs/             # JSON configuration files
+├── tests/               # Unit tests
+├── data/                # Data storage (created by projorg)
+└── plots/               # Visualization outputs (created by projorg)
 ```
 
 ## Quick Start
@@ -59,66 +77,6 @@ pytest tests/test_coupling_layer.py -v
 pytest tests/test_ensemble.py -v
 ```
 
-## Project Structure
-
-```
-cncv/
-├── cncv/                 # Main package
-│   ├── models/          # Coupling layers and ensemble models
-│   │   ├── coupling_layer.py
-│   │   └── ensemble.py
-│   └── utils/           # Distribution utilities and optimizers
-│       ├── gaussian.py
-│       ├── rosenbrock.py
-│       ├── psgld.py
-│       └── lr_scheduler.py
-├── scripts/             # Training and evaluation scripts
-│   ├── gaussian_ensemble_cv.py
-│   └── rosenbrock_ensemble_cv.py
-├── configs/             # JSON configuration files
-├── tests/               # Unit tests
-├── data/                # Data storage (created by projorg)
-└── plots/               # Visualization outputs (created by projorg)
-```
-
-## Key Features
-
-- **Reversible coupling layers** with forward/reverse split options
-- **Ensemble architecture** for robust control variate learning
-- **Automatic Jacobian trace computation** for Stein operator
-- **projorg integration** for reproducible experiment management
-- **Comprehensive test suite** with finite difference verification
-
-## Dependencies
-
-- Python >= 3.9
-- PyTorch
-- NumPy
-- matplotlib
-- tqdm
-- projorg (for path and experiment management)
-- pytest (for testing)
-
-## Configuration
-
-Experiments are configured via JSON files in `configs/`. Example:
-
-```json
-{
-    "experiment_name": "gaussian_ensemble_cv",
-    "max_epochs": 50,
-    "lr": 0.001,
-    "lr_final": 0.0001,
-    "sigma": 0.3,
-    "n_ensemble_members": 2,
-    "batchsize": 256,
-    "n_hidden": 32,
-    "n_layers": 3,
-    "num_train": 65536,
-    "num_val": 2048,
-    "num_samples": 10000
-}
-```
 
 ## Usage Example
 
@@ -148,34 +106,30 @@ score = compute_score_posterior_gaussian(X, C, mu_prior, Sigma_inv, sigma)
 g_combined, all_g = ensemble(X, C, score)
 ```
 
-## Testing
+## Configuration
 
-The package includes comprehensive tests for:
-- Jacobian trace computation (finite difference verification)
-- Coupling layer gradients
-- Ensemble forward/backward passes
-- Distribution utilities
+Experiments are configured via JSON files in `configs/`. Example:
 
-Run with: `pytest tests/ -v`
+```json
+{
+    "experiment_name": "gaussian_ensemble_cv",
+    "max_epochs": 50,
+    "lr": 0.001,
+    "lr_final": 0.0001,
+    "sigma": 0.3,
+    "n_ensemble_members": 2,
+    "batchsize": 256,
+    "n_hidden": 32,
+    "n_layers": 3,
+    "num_train": 65536,
+    "num_val": 2048,
+    "num_samples": 10000
+}
+```
+
 
 ## Author
 
 Ali Siahkoohi (alisk@ucf.edu)
-University of Central Florida, 2025
 
-## License
 
-MIT License - see LICENSE file for details
-
-## Citation
-
-If you use this code in your research, please cite:
-
-```bibtex
-@software{cncv2025,
-  author = {Siahkoohi, Ali},
-  title = {CNCV: Conditional Neural Control Variates},
-  year = {2025},
-  url = {https://github.com/luqigroup/CNCV.jl}
-}
-```
