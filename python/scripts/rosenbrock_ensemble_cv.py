@@ -25,7 +25,6 @@ from projorg import checkpointsdir, plotsdir, setup_environment
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from cncv import (
-    create_forward_reverse_ensemble,
     create_random_split_ensemble,
     RosenbrockDistribution,
     compute_score_posterior_rosenbrock,
