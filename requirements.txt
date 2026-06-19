@@ -1,0 +1,9 @@
+torch>=2.0
+numpy
+scipy
+matplotlib
+tqdm
+projorg
+# Optional: regenerating the Darcy dataset needs an external Devito-based
+# groundwater solver (set CNCV_GROUNDWATER_DIR to its location). The released
+# datasets download automatically, so it is not required to reproduce results.

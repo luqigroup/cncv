@@ -1,0 +1,21 @@
+{
+    "experiment_name": "cnf_gaussian",
+    "input_dim": 4,
+    "n_hidden": 128,
+    "n_mlp_layers": 3,
+    "n_flow_layers": 12,
+    "depth": 2,
+    "max_epochs": 1000,
+    "lr": 0.001,
+    "lr_final": 0.00001,
+    "batchsize": 8192,
+    "num_train": 262144,
+    "num_val": 8192,
+    "num_samples": 50000,
+    "sigma": 0.3,
+    "save_freq": 999,
+    "gpu_id": 0,
+    "seed": 12,
+    "phase": "train",
+    "testing_epoch": -1
+}

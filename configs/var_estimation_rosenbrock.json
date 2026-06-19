@@ -1,0 +1,19 @@
+{
+    "experiment_name": "var_estimation_rosenbrock",
+    "problem": "rosenbrock",
+    "n_ensemble": 16,
+    "n_hidden": 64,
+    "n_layers": 3,
+    "depth": 2,
+    "max_epochs": 50,
+    "batchsize": 2048,
+    "lr": 0.001,
+    "lr_final": 0.0001,
+    "num_train": 65536,
+    "num_val": 2048,
+    "n_mc_mean": 256,
+    "n_test_obs": 10,
+    "num_samples": 10000,
+    "gpu": 0,
+    "seed": 1
+}

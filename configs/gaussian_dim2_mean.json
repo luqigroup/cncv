@@ -1,0 +1,22 @@
+{
+    "experiment_name": "gaussian_dim2_mean",
+    "input_dim": 2,
+    "max_epochs": 100,
+    "lr": 0.001,
+    "lr_final": 0.0001,
+    "sigma": 0.3,
+    "n_ensemble_members": 4,
+    "batchsize": 1024,
+    "n_hidden": 64,
+    "n_layers": 3,
+    "num_train": 65536,
+    "num_val": 2048,
+    "num_samples": 10000,
+    "save_freq": 50,
+    "gpu_id": 0,
+    "seed": 42,
+    "phase": "train",
+    "testing_epoch": -1,
+    "qofi": "mean",
+    "ddpm": 0
+}
